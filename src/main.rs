@@ -3,16 +3,21 @@
 mod anim;
 mod capture;
 mod clip;
+mod float;
 mod gfx;
 mod notch;
 mod ocr;
 mod overlay;
 mod pdf;
+mod pretty;
+mod rec;
 mod redact;
 mod scroll;
+mod secrets;
 mod store;
 
 use capture::{Frame, cursor, grab, monitors};
+use float::Float;
 use gfx::Gfx;
 use notch::{Notch, View};
 use overlay::{Mode, Outcome, Overlay};
@@ -38,6 +43,7 @@ pub const WM_RUN: u32 = WM_APP + 2;
 const WM_WORK: u32 = WM_APP + 3;
 const WM_KEY: u32 = WM_APP + 4;
 pub const WM_PICK_FOLDER: u32 = WM_APP + 5;
+const WM_PASTED: u32 = WM_APP + 6;
 
 pub const T_DWELL: usize = 1;
 pub const T_LEAVE: usize = 2;
@@ -47,10 +53,17 @@ const T_COUNT: usize = 5;
 const T_INTERVAL: usize = 6;
 const T_HOURLY: usize = 7;
 const T_TRIM: usize = 8;
+const T_CLIP: usize = 9;
+const T_PASTE: usize = 10;
+pub const T_REC: usize = 11;
 
 enum Work {
-    Shot(Frame),
+    Shot(Frame, RECT),
     Text(String),
+    /// What a shot turned out to say.
+    Name(i64, String),
+    Clip(Option<rec::Clip>),
+    Gif(Option<(PathBuf, i64)>),
     Failed,
 }
 
@@ -63,7 +76,18 @@ pub struct App {
     pub clip: Vec<i64>,
     png: Option<PngSource>,
     /// Which hotkeys Windows gave us.
-    pub hot: [bool; 3],
+    pub hot: [bool; 4],
+    pub rec: Option<rec::Rec>,
+    /// App the clip is of.
+    rec_app: String,
+    floats: Vec<Float>,
+    /// Still to be pasted, next first.
+    pub queue: Vec<i64>,
+    /// Background jobs the notch shows as one moving line.
+    pub jobs: usize,
+    /// Last picture another app copied.
+    seen: u64,
+    quitting: bool,
     pub interval: Option<RECT>,
     pub login: bool,
     pub outgoing: Vec<i64>,
@@ -114,14 +138,19 @@ pub fn note(s: &str) {
 }
 
 impl App {
-    /// Put items on the clipboard: a picture for one shot, files otherwise.
+    /// Put items on the clipboard: a picture for one shot, text for texts, files otherwise.
     pub fn copy(&mut self, ids: &[i64]) -> bool {
+        self.end_queue();
+        self.put(ids)
+    }
+
+    fn put(&mut self, ids: &[i64]) -> bool {
         let items: Vec<_> = ids.iter().filter_map(|i| self.store.get(*i)).collect();
-        let files: Vec<PathBuf> = items.iter().map(|i| i.path.clone()).collect();
+        let files: Vec<PathBuf> = items.iter().filter(|i| i.kind != Kind::Text).map(|i| i.path.clone()).collect();
         let ok = match items.as_slice() {
             [one] if one.kind == Kind::Shot => {
                 let path = one.path.clone();
-                match std::fs::read(&path).ok().and_then(|b| store::decode_png(&b)) {
+                match read_shot(&path) {
                     Some(f) => {
                         let ok = clip::set_image(self.main, &f);
                         self.png = Some(PngSource::File(path));
@@ -131,6 +160,10 @@ impl App {
                 }
             }
             [] => false,
+            all if all.iter().all(|i| i.kind == Kind::Text) => {
+                let t: Vec<String> = ids.iter().filter_map(|i| self.store.text(*i)).collect();
+                clip::set_text(self.main, &t.join("\r\n"))
+            }
             _ => clip::set_files(self.main, &files),
         };
         if ok {
@@ -139,15 +172,140 @@ impl App {
         ok
     }
 
+    /// Each paste hands over the next item.
+    pub fn start_queue(&mut self, ids: &[i64]) -> bool {
+        if !self.copy(&ids[..1]) {
+            return false;
+        }
+        self.queue = ids.to_vec();
+        start_paste_hook();
+        true
+    }
+
+    fn end_queue(&mut self) {
+        self.queue.clear();
+        stop_hook(&PASTE_HOOK);
+        unsafe {
+            let _ = KillTimer(Some(self.main), T_PASTE);
+        }
+    }
+
+    fn next_in_queue(&mut self, n: &mut Notch) {
+        if self.queue.is_empty() {
+            return;
+        }
+        self.queue.remove(0);
+        // Skip anything that went missing meanwhile.
+        while let Some(id) = self.queue.first().copied() {
+            if self.put(&[id]) {
+                n.repaint();
+                return;
+            }
+            self.queue.remove(0);
+        }
+        self.end_queue();
+        if matches!(n.view, View::Rest) {
+            n.done(&self.g, &self.store);
+        }
+    }
+
+    /// A file to hand to another app.
+    pub fn file(&self, id: i64) -> Option<PathBuf> {
+        let i = self.store.get(id)?;
+        match i.kind {
+            Kind::Text => clip::text_file(id, &self.store.text(id)?),
+            _ => Some(i.path.clone()),
+        }
+    }
+
     pub fn merge(&mut self, ids: &[i64]) -> Option<i64> {
-        let files: Vec<PathBuf> = ids.iter().filter_map(|i| self.store.get(*i)).map(|i| i.path.clone()).collect();
+        let items: Vec<_> = ids.iter().filter_map(|i| self.store.get(*i)).collect();
+        let files: Vec<PathBuf> = items.iter().map(|i| i.path.clone()).collect();
+        let app = items.first()?.app.clone();
         let bytes = pdf::merge(&files)?;
         let thumb = self.store.thumb(*ids.first()?)?;
         let path = self.store.new_path("pdf");
         store::write_file(&path, &bytes).ok()?;
-        let id = self.store.add(&path, Kind::Pdf, &thumb).ok()?;
+        let id = self.store.add(&path, Kind::Pdf, &thumb, &app, 0).ok()?;
         self.copy(&[id]);
         Some(id)
+    }
+
+    /// Set shots on a backdrop, as new shots.
+    pub fn backdrop(&mut self, ids: &[i64]) -> Option<i64> {
+        let mut last = None;
+        for id in ids {
+            let i = self.store.get(*id)?;
+            let (path, app) = (i.path.clone(), i.app.clone());
+            let f = pretty::make(&self.g, &read_shot(&path)?).ok()?;
+            last = self.deliver(f, false, || app);
+        }
+        last
+    }
+
+    pub fn float(&mut self, ids: &[i64], mon: &capture::Monitor) -> bool {
+        let mut any = false;
+        for (n, id) in ids.iter().take(12).enumerate() {
+            let Some(f) = self.store.get(*id).map(|i| i.path.clone()).and_then(|p| read_shot(&p)) else { continue };
+            let fit = |k: f32| (mon.w() as f32 * k / f.w as f32).min(mon.h() as f32 * k / f.h as f32);
+            let zoom = fit(0.5).min(1.0);
+            let (w, h) = ((f.w as f32 * zoom) as i32, (f.h as f32 * zoom) as i32);
+            let step = n as i32 * 36;
+            let at = POINT {
+                x: (mon.rect.left + mon.rect.right - w) / 2 + step,
+                y: (mon.rect.top + mon.rect.bottom - h) / 2 + step,
+            };
+            any |= self.float_at(&f, at, zoom, mon.dpi);
+        }
+        any
+    }
+
+    fn float_at(&mut self, f: &Frame, at: POINT, zoom: f32, dpi: u32) -> bool {
+        match Float::open(&self.g, self.inst, f, at, zoom, dpi) {
+            Ok(f) => {
+                self.floats.push(f);
+                true
+            }
+            Err(e) => {
+                note(&format!("float failed {e}"));
+                false
+            }
+        }
+    }
+
+    pub fn gif(&mut self, ids: &[i64]) {
+        for id in ids {
+            let Some(i) = self.store.get(*id).filter(|i| i.kind == Kind::Clip) else { continue };
+            let (src, dst, from, main) = (i.path.clone(), self.store.new_path("gif"), *id, self.main.0 as isize);
+            self.jobs += 1;
+            std::thread::spawn(move || {
+                let ok = rec::gif(&src, &dst).is_some();
+                post(main, Work::Gif(ok.then_some((dst, from))));
+            });
+        }
+    }
+
+    pub fn stop_rec(&mut self, n: &mut Notch) {
+        if self.rec.take().is_some() {
+            self.jobs += 1;
+            n.rec = None;
+            unsafe {
+                let _ = KillTimer(Some(self.main), T_REC);
+            }
+            n.show(&self.g, &self.store, View::Rest);
+        }
+    }
+
+    pub fn quit(&mut self, n: &mut Notch) {
+        if self.rec.is_some() {
+            // Finish the clip first.
+            self.quitting = true;
+            self.stop_rec(n);
+        } else {
+            unsafe {
+                let _ = DestroyWindow(self.main);
+            }
+        }
     }
 
     pub fn run(&self, m: Mode) {
@@ -170,7 +328,7 @@ impl App {
     }
 
     fn unregister(&mut self) {
-        for i in 0..3 {
+        for i in 0..4 {
             if std::mem::take(&mut self.hot[i]) {
                 unsafe {
                     let _ = UnregisterHotKey(Some(self.main), i as i32 + 1);
@@ -186,7 +344,7 @@ impl App {
         }
         let s = &self.store.settings;
         let mut changed = false;
-        for (i, k) in [s.region, s.screen, s.window].into_iter().enumerate() {
+        for (i, k) in s.keys().into_iter().enumerate() {
             if !self.hot[i] && k.1 != 0 {
                 let m = HOT_KEY_MODIFIERS(k.0) | MOD_NOREPEAT;
                 self.hot[i] = unsafe { RegisterHotKey(Some(self.main), i as i32 + 1, m, k.1) }.is_ok();
@@ -197,27 +355,46 @@ impl App {
     }
 
     /// A finished capture: clipboard first, then notch, then disk.
-    fn deliver(&mut self, f: Frame, quiet: bool) -> Option<i64> {
+    fn deliver(&mut self, f: Frame, quiet: bool, app: impl FnOnce() -> String) -> Option<i64> {
         if f.w < 1 || f.h < 1 {
             return None;
         }
         let t = Instant::now();
+        if !quiet {
+            self.end_queue();
+        }
         let on_clip = !quiet && clip::set_image(self.main, &f);
         note(&format!("clipboard_ms {:.1}", t.elapsed().as_secs_f64() * 1e3));
-        let thumb = f.thumb(store::THUMB.0, store::THUMB.1);
-        let path = self.store.new_path("png");
-        let id = self.store.add(&path, Kind::Shot, &thumb).ok()?;
+        let held = on_clip.then(|| f.clone());
+        let id = self.keep(f, &app(), !quiet)?;
         if on_clip {
             self.clip = vec![id];
-            self.png = Some(PngSource::Frame(f.clone()));
+            self.png = held.map(PngSource::Frame);
         }
         note(&format!("indexed_ms {:.1}", t.elapsed().as_secs_f64() * 1e3));
+        Some(id)
+    }
+
+    /// Index a picture and save it behind the scenes, named after what it says.
+    fn keep(&mut self, f: Frame, app: &str, named: bool) -> Option<i64> {
+        let t = Instant::now();
+        let thumb = f.thumb(store::THUMB.0, store::THUMB.1);
+        let path = self.store.new_path("png");
+        let id = self.store.add(&path, Kind::Shot, &thumb, app, 0).ok()?;
         let main = self.main.0 as isize;
         std::thread::spawn(move || {
             let ok = store::write_file(&path, &store::encode_png(&f)).is_ok();
             note(&format!("saved_ms {:.1} {ok}", t.elapsed().as_secs_f64() * 1e3));
             if !ok {
-                post(main, Work::Failed);
+                return post(main, Work::Failed);
+            }
+            if named {
+                // The top says what it is; long captures needn't be read whole.
+                let top = f.crop(RECT { left: 0, top: 0, right: f.w.min(4000), bottom: f.h.min(1600) });
+                drop(f);
+                if let Some(t) = ocr::words(&top).ok().and_then(|w| store::title(&w)) {
+                    post(main, Work::Name(id, t));
+                }
             }
         });
         unsafe {
@@ -226,14 +403,67 @@ impl App {
         Some(id)
     }
 
+    fn name(&mut self, id: i64, title: &str) {
+        // Files already on the clipboard keep their names.
+        if self.clip.len() > 1 && self.clip.contains(&id) {
+            return;
+        }
+        if let Some(p) = self.store.rename(id, title) {
+            if self.clip == [id] && matches!(self.png, Some(PngSource::File(_))) {
+                self.png = Some(PngSource::File(p));
+            }
+        }
+    }
+
+    /// Another app copied something.
+    fn take_clipboard(&mut self, n: &mut Notch) {
+        let app = capture::app_name(unsafe { GetForegroundWindow() });
+        match clip::read(self.main) {
+            Some(clip::Taken::Text(t)) => {
+                if let Ok(id) = self.store.add_text(&t, &app) {
+                    self.clip = vec![id];
+                }
+            }
+            Some(clip::Taken::Image(f)) => {
+                use std::hash::{DefaultHasher, Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                (f.w, f.h, &f.px).hash(&mut h);
+                if std::mem::replace(&mut self.seen, h.finish()) == self.seen {
+                    return;
+                }
+                if let Some(id) = self.keep(f, &app, true) {
+                    self.clip = vec![id];
+                }
+            }
+            None => return,
+        }
+        n.refresh(&self.g, &self.store);
+    }
+
     fn grab_now(&mut self, n: &mut Notch, r: RECT) {
         if let Ok(f) = grab(r) {
             self.remember(r);
-            if let Some(id) = self.deliver(f, false) {
+            if let Some(id) = self.deliver(f, false, || capture::app_at(&capture::windows(), r)) {
                 n.flash(&self.g, &self.store, id);
             }
         } else {
             n.fail();
+        }
+    }
+
+    fn record(&mut self, n: &mut Notch, r: RECT) {
+        let main = self.main.0 as isize;
+        let path = self.store.new_path("mp4");
+        match rec::Rec::start(self.inst, r, path, move |c| post(main, Work::Clip(c))) {
+            Some(r) => {
+                self.rec = Some(r);
+                n.rec = Some(Instant::now());
+                n.show(&self.g, &self.store, View::Rest);
+                unsafe {
+                    SetTimer(Some(self.main), T_REC, 250, None);
+                }
+            }
+            None => n.fail(),
         }
     }
 
@@ -245,6 +475,9 @@ impl App {
     fn start(&mut self, n: &mut Notch, m: Mode) {
         if self.overlay.as_ref().is_some_and(|o| !o.flying()) {
             return;
+        }
+        if m == Mode::Clip && self.rec.is_some() {
+            return self.stop_rec(n);
         }
         if let Some(mut o) = self.overlay.take() {
             o.close();
@@ -315,7 +548,7 @@ impl App {
                     o.close();
                     let main = self.main.0 as isize;
                     std::thread::spawn(move || {
-                        post(main, scroll::run(r).map(Work::Shot).unwrap_or(Work::Failed));
+                        post(main, scroll::run(r).map(|f| Work::Shot(f, r)).unwrap_or(Work::Failed));
                     });
                 }
                 Mode::Interval => {
@@ -338,11 +571,31 @@ impl App {
                         post(main, if t.is_empty() { Work::Failed } else { Work::Text(t) });
                     });
                 }
+                Mode::Clip => {
+                    self.rec_app = o.app(r);
+                    o.refocus();
+                    o.close();
+                    self.record(n, r);
+                }
+                Mode::Float => {
+                    let f = o.take(&self.g, r);
+                    let app = o.app(r);
+                    o.refocus();
+                    o.close();
+                    let p = POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+                    let dpi = monitors().iter().find(|m| m.has(p)).map_or(96, |m| m.dpi);
+                    self.remember(r);
+                    let ok = self.float_at(&f, POINT { x: r.left, y: r.top }, 1.0, dpi);
+                    match self.deliver(f, false, || app) {
+                        Some(id) if ok => n.flash(&self.g, &self.store, id),
+                        _ => n.fail(),
+                    }
+                }
                 _ => {
                     let t = Instant::now();
                     let f = o.take(&self.g, r);
                     self.remember(r);
-                    let id = self.deliver(f.clone(), false);
+                    let id = self.deliver(f.clone(), false, || o.app(r));
                     note(&format!("release_ms {:.1}", t.elapsed().as_secs_f64() * 1e3));
                     if let Some(id) = id {
                         n.flash(&self.g, &self.store, id);
@@ -359,12 +612,17 @@ impl App {
     }
 
     fn tick_interval(&mut self, n: &mut Notch) {
-        if let Some(f) = self.interval.and_then(|r| grab(r).ok()) {
-            if self.deliver(f, true).is_some() {
+        let Some(r) = self.interval else { return };
+        if let Ok(f) = grab(r) {
+            if self.deliver(f, true, || capture::app_at(&capture::windows(), r)).is_some() {
                 n.refresh(&self.g, &self.store);
             }
         }
     }
+}
+
+pub fn read_shot(p: &std::path::Path) -> Option<Frame> {
+    std::fs::read(p).ok().and_then(|b| store::decode_png(&b))
 }
 
 fn post(main: isize, w: Work) {
@@ -378,7 +636,9 @@ fn post(main: isize, w: Work) {
 
 // ── Recording a hotkey ─────────────────────────────────────────────────────
 
-static HOOK: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+type Hook = AtomicPtr<std::ffi::c_void>;
+static HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
+static PASTE_HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
 
 fn start_key_hook() {
     unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -410,15 +670,46 @@ fn start_key_hook() {
         }
     }
     unsafe {
-        stop_key_hook();
+        stop_hook(&HOOK);
         if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
             HOOK.store(h.0, Relaxed);
         }
     }
 }
 
-fn stop_key_hook() {
-    let h = HOOK.swap(std::ptr::null_mut(), Relaxed);
+/// Listens for paste while a queue runs. Never blocks a key.
+fn start_paste_hook() {
+    unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+        use std::sync::atomic::AtomicBool;
+        static HELD: AtomicBool = AtomicBool::new(false);
+        unsafe {
+            if code >= 0 {
+                let k = &*(l.0 as *const KBDLLHOOKSTRUCT);
+                let down = |v: VIRTUAL_KEY| GetAsyncKeyState(v.0 as i32) < 0;
+                let vk = VIRTUAL_KEY(k.vkCode as u16);
+                if vk == VK_V || vk == VK_INSERT {
+                    let press = w.0 as u32 == WM_KEYDOWN;
+                    // A held key pastes once.
+                    let repeat = HELD.swap(press, Relaxed) && press;
+                    let mods = if vk == VK_V { down(VK_CONTROL) } else { down(VK_SHIFT) };
+                    if let (true, false, true, Some(a)) = (press, repeat, mods && !down(VK_MENU), app()) {
+                        let _ = PostMessageW(Some(a.main), WM_PASTED, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            CallNextHookEx(None, code, w, l)
+        }
+    }
+    unsafe {
+        stop_hook(&PASTE_HOOK);
+        if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
+            PASTE_HOOK.store(h.0, Relaxed);
+        }
+    }
+}
+
+fn stop_hook(h: &Hook) {
+    let h = h.swap(std::ptr::null_mut(), Relaxed);
     if !h.is_null() {
         unsafe {
             let _ = UnhookWindowsHookEx(HHOOK(h));
@@ -529,6 +820,10 @@ fn pick_folder(owner: HWND) -> Option<PathBuf> {
 
 // ── Messages ───────────────────────────────────────────────────────────────
 
+pub extern "system" fn plain(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRESULT {
+    unsafe { DefWindowProcW(h, msg, wp, l) }
+}
+
 pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRESULT {
     let fallback = || unsafe { DefWindowProcW(h, msg, wp, l) };
     let (Some(a), Some(n)) = (app(), notch()) else { return fallback() };
@@ -550,6 +845,16 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         a.finish(n, out);
         return LRESULT(0);
     }
+    if let Some(k) = a.floats.iter().position(|f| f.hwnd == h) {
+        if msg == WM_MOUSEACTIVATE {
+            return LRESULT(MA_NOACTIVATE as isize);
+        }
+        if a.floats[k].message(&a.g, msg, wp, l) {
+            a.floats.remove(k).close();
+            return LRESULT(0);
+        }
+        return fallback();
+    }
     if h != a.main {
         return fallback();
     }
@@ -557,6 +862,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         WM_HOTKEY => match wp.0 {
             1 => a.start(n, Mode::Region),
             2 => a.start(n, Mode::Screen),
+            4 => a.start(n, Mode::Clip),
             _ => a.front_window(n),
         },
         WM_RUN => {
@@ -567,9 +873,51 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         WM_WORK => {
             let w = unsafe { *Box::from_raw(l.0 as *mut Work) };
             match w {
-                Work::Shot(f) => {
-                    if let Some(id) = a.deliver(f, false) {
+                Work::Shot(f, r) => {
+                    if let Some(id) = a.deliver(f, false, || capture::app_at(&capture::windows(), r)) {
                         n.flash(&a.g, &a.store, id);
+                    }
+                }
+                Work::Name(id, t) => {
+                    // Never under a drag in progress.
+                    if !n.modal {
+                        a.name(id, &t);
+                    }
+                }
+                Work::Clip(c) => {
+                    // Ended by itself: the recorder hit its limit or failed.
+                    if a.rec.is_some() {
+                        a.stop_rec(n);
+                    }
+                    a.jobs -= 1;
+                    let app = std::mem::take(&mut a.rec_app);
+                    let id = c.and_then(|c| a.store.add(&c.path, Kind::Clip, &c.thumb, &app, c.secs).ok());
+                    match id {
+                        Some(id) => {
+                            a.copy(&[id]);
+                            n.flash(&a.g, &a.store, id);
+                        }
+                        None => n.fail(),
+                    }
+                    if a.quitting {
+                        a.quit(n);
+                    }
+                }
+                Work::Gif(g) => {
+                    a.jobs -= 1;
+                    let id = g.and_then(|(p, from)| {
+                        let thumb = a.store.thumb(from)?;
+                        let i = a.store.get(from)?;
+                        let (app, secs) = (i.app.clone(), i.secs);
+                        a.store.add(&p, Kind::Gif, &thumb, &app, secs).ok()
+                    });
+                    match id {
+                        Some(id) => {
+                            a.copy(&[id]);
+                            n.flash(&a.g, &a.store, id);
+                            n.mark_copied(id);
+                        }
+                        None => n.fail(),
                     }
                 }
                 Work::Text(t) => {
@@ -581,22 +929,29 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         }
         WM_KEY => {
             if let Some(row) = n.recording.take() {
-                stop_key_hook();
+                stop_hook(&HOOK);
                 let vk = l.0 as u32;
                 if vk != VK_ESCAPE.0 as u32 {
                     let k = if vk == VK_BACK.0 as u32 { (0, 0) } else { (wp.0 as u32, vk) };
                     let s = &mut a.store.settings;
-                    *[&mut s.region, &mut s.screen, &mut s.window][row] = k;
+                    *[&mut s.region, &mut s.screen, &mut s.window, &mut s.clip][row] = k;
                     a.store.save_settings();
                 }
                 a.register();
                 n.repaint();
             }
         }
+        WM_PASTED => {
+            // The app reads the clipboard now; swap it once that's done.
+            if !a.queue.is_empty() {
+                unsafe {
+                    SetTimer(Some(h), T_PASTE, 250, None);
+                }
+            }
+        }
         WM_DRAG_OUT => {
             let ids = std::mem::take(&mut a.outgoing);
-            let files: Vec<PathBuf> =
-                ids.iter().filter_map(|i| a.store.get(*i)).map(|i| i.path.clone()).collect();
+            let files: Vec<PathBuf> = ids.iter().filter_map(|i| a.file(*i)).collect();
             n.modal = true;
             n.show(&a.g, &a.store, View::Rest);
             let main = a.main;
@@ -650,6 +1005,19 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 }
             }
             T_INTERVAL => a.tick_interval(n),
+            T_REC => n.repaint(),
+            T_CLIP => {
+                unsafe {
+                    let _ = KillTimer(Some(h), T_CLIP);
+                }
+                a.take_clipboard(n);
+            }
+            T_PASTE => {
+                unsafe {
+                    let _ = KillTimer(Some(h), T_PASTE);
+                }
+                a.next_in_queue(n);
+            }
             T_HOURLY => {
                 let _ = a.store.reload();
                 n.refresh(&a.g, &a.store);
@@ -680,10 +1048,17 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         },
         WM_CLIPBOARDUPDATE => {
             let ours = unsafe { GetClipboardOwner() }.is_ok_and(|o| o == a.main);
-            if !ours && !a.clip.is_empty() {
+            if !ours {
+                a.end_queue();
                 a.clip.clear();
                 a.png = None;
                 n.repaint();
+                if a.store.settings.history {
+                    // Apps put their formats on one by one.
+                    unsafe {
+                        SetTimer(Some(h), T_CLIP, 80, None);
+                    }
+                }
             }
         }
         WM_RENDERFORMAT => {
@@ -704,7 +1079,8 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_DESTROY => {
-            stop_key_hook();
+            stop_hook(&HOOK);
+            stop_hook(&PASTE_HOOK);
             a.unregister();
             unsafe { PostQuitMessage(0) };
         }
@@ -755,7 +1131,14 @@ fn main() {
             main: n.sensor,
             clip: Vec::new(),
             png: None,
-            hot: [false; 3],
+            hot: [false; 4],
+            rec: None,
+            rec_app: String::new(),
+            floats: Vec::new(),
+            queue: Vec::new(),
+            jobs: 0,
+            seen: 0,
+            quitting: false,
             interval: None,
             login: login_on(),
             outgoing: Vec::new(),

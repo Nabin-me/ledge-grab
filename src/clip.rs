@@ -5,7 +5,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{BI_BITFIELDS, BITMAPV5HEADER, LCS_GM_IMAGES};
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::*;
-use windows::Win32::System::Ole::{CF_DIBV5, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY};
+use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY};
 use windows::Win32::UI::Shell::*;
 use windows::core::{PCWSTR, Result, w};
 
@@ -138,6 +138,89 @@ pub fn set_text(hwnd: HWND, s: &str) -> bool {
     }
 }
 
+pub enum Taken {
+    Text(String),
+    Image(Frame),
+}
+
+unsafe fn bytes(format: u32) -> Option<Vec<u8>> {
+    unsafe {
+        IsClipboardFormatAvailable(format).ok()?;
+        let h = HGLOBAL(GetClipboardData(format).ok()?.0);
+        let n = GlobalSize(h);
+        // A 100 MP picture is past anything worth keeping.
+        if n == 0 || n > 400_000_000 {
+            return None;
+        }
+        let p = GlobalLock(h) as *const u8;
+        if p.is_null() {
+            return None;
+        }
+        let v = std::slice::from_raw_parts(p, n).to_vec();
+        let _ = GlobalUnlock(h);
+        Some(v)
+    }
+}
+
+/// What another app just copied, unless it asked not to be remembered.
+pub fn read(hwnd: HWND) -> Option<Taken> {
+    unsafe {
+        let named = |n| RegisterClipboardFormatW(n);
+        let has = |f| IsClipboardFormatAvailable(f).is_ok();
+        if has(named(w!("ExcludeClipboardContentFromMonitorProcessing"))) || has(named(w!("Clipboard Viewer Ignore"))) {
+            return None;
+        }
+        if !open(hwnd) {
+            return None;
+        }
+        let out = (|| {
+            let keep = named(w!("CanIncludeInClipboardHistory"));
+            if bytes(keep).is_some_and(|b| b.iter().take(4).all(|b| *b == 0)) {
+                return None;
+            }
+            if let Some(b) = bytes(CF_UNICODETEXT.0 as u32) {
+                let t: Vec<u16> =
+                    b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|c| *c != 0).collect();
+                let t = String::from_utf16_lossy(&t);
+                return (!t.trim().is_empty() && t.len() <= crate::store::TEXT_MAX).then_some(Taken::Text(t));
+            }
+            if has(CF_HDROP.0 as u32) {
+                return None;
+            }
+            let png = bytes(png_format()).and_then(|b| crate::store::decode_png(&b));
+            png.or_else(|| dib(&bytes(CF_DIB.0 as u32)?)).filter(|f| f.w > 3 && f.h > 3).map(Taken::Image)
+        })();
+        let _ = CloseClipboard();
+        out
+    }
+}
+
+/// An uncompressed 24 or 32 bit bitmap.
+fn dib(b: &[u8]) -> Option<Frame> {
+    let u = |o: usize| b.get(o..o + 4).map(|v| u32::from_le_bytes(v.try_into().unwrap()));
+    let (head, w, h) = (u(0)? as usize, u(4)? as i32, u(8)? as i32);
+    let bits = b.get(14..16).map(|v| u16::from_le_bytes([v[0], v[1]]))? as usize;
+    let (how, colors) = (u(16)?, u(32)? as usize);
+    let masks = if head == 40 && how == BI_BITFIELDS.0 { 12 } else { 0 };
+    if !matches!(bits, 24 | 32) || (how != 0 && how != BI_BITFIELDS.0) || w < 1 || h == 0 || w > 32768 || h.unsigned_abs() > 32768 {
+        return None;
+    }
+    let pitch = (w as usize * bits).div_ceil(32) * 4;
+    let px = b.get(head + masks + colors * 4..)?;
+    let n = h.unsigned_abs() as usize;
+    if px.len() < pitch * n {
+        return None;
+    }
+    let mut f = Frame::new(w, n as i32);
+    for (y, row) in f.px.chunks_exact_mut(w as usize * 4).enumerate() {
+        let s = if h > 0 { n - 1 - y } else { y } * pitch;
+        for (d, p) in row.chunks_exact_mut(4).zip(px[s..].chunks_exact(bits / 8)) {
+            d.copy_from_slice(&[p[0], p[1], p[2], 255]);
+        }
+    }
+    Some(f)
+}
+
 fn wide(p: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     p.as_os_str().encode_wide().chain([0]).collect()
@@ -177,6 +260,15 @@ pub fn open_file(p: &Path) {
     }
 }
 
+/// Copied text as a file, for dragging and opening.
+pub fn text_file(id: i64, text: &str) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("Signet");
+    std::fs::create_dir_all(&dir).ok()?;
+    let p = dir.join(format!("Text {id}.txt"));
+    std::fs::write(&p, text).ok()?;
+    Some(p)
+}
+
 /// Blocks until the drop ends.
 pub fn drag(hwnd: HWND, files: &[PathBuf]) {
     unsafe {
@@ -199,5 +291,26 @@ pub fn drag(hwnd: HWND, files: &[PathBuf]) {
         for p in ids {
             ILFree(Some(p));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_bitmaps() {
+        // 1x2, 24 bit, bottom-up: red above blue.
+        let mut b = vec![0u8; 40];
+        b[0] = 40;
+        b[4] = 1;
+        b[8] = 2;
+        b[12] = 1;
+        b[14] = 24;
+        b.extend([255, 0, 0, 0, 0, 0, 255, 0]);
+        let f = dib(&b).unwrap();
+        assert_eq!((f.w, f.h), (1, 2));
+        assert_eq!(f.px, [0, 0, 255, 255, 255, 0, 0, 255]);
+        assert!(dib(&b[..44]).is_none());
     }
 }

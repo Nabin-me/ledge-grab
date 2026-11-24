@@ -13,7 +13,7 @@ u.PostMessageW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM]
 u.FindWindowW.restype = W.HWND
 MOVE, DOWN, UP, RUP, WHEEL, KEY, CHAR, TIMER = 0x200, 0x201, 0x202, 0x205, 0x20A, 0x100, 0x102, 0x113
 RUN = 0x8000 + 2
-MODES = ["Region", "Window", "Screen", "All", "Last", "Scroll", "Delay", "Interval", "Text", "Color"]
+MODES = ["Region", "Window", "Screen", "All", "Last", "Scroll", "Delay", "Interval", "Text", "Color", "Clip", "Float"]
 
 
 class App:

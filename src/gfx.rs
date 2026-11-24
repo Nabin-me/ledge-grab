@@ -137,18 +137,7 @@ impl Gfx {
                 None,
             )?;
             let ctx = self.d2d.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-            let buf: IDXGISurface = swap.GetBuffer(0)?;
-            let target = ctx.CreateBitmapFromDxgiSurface(
-                &buf,
-                Some(&D2D1_BITMAP_PROPERTIES1 {
-                    pixelFormat: pixel_format(),
-                    dpiX: 96.0,
-                    dpiY: 96.0,
-                    bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-                    ..Default::default()
-                }),
-            )?;
-            ctx.SetTarget(&target);
+            let target = Some(target(&ctx, &swap)?);
             ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let comp = self.dcomp.CreateTargetForHwnd(hwnd, true)?;
             let visual = self.dcomp.CreateVisual()?;
@@ -259,16 +248,47 @@ fn pixel_format() -> D2D1_PIXEL_FORMAT {
 pub struct Surface {
     pub ctx: ID2D1DeviceContext,
     swap: IDXGISwapChain1,
-    target: ID2D1Bitmap1,
+    target: Option<ID2D1Bitmap1>,
     _comp: IDCompositionTarget,
     _visual: IDCompositionVisual,
 }
 
+unsafe fn target(ctx: &ID2D1DeviceContext, swap: &IDXGISwapChain1) -> Result<ID2D1Bitmap1> {
+    unsafe {
+        let buf: IDXGISurface = swap.GetBuffer(0)?;
+        let t = ctx.CreateBitmapFromDxgiSurface(
+            &buf,
+            Some(&D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: pixel_format(),
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                ..Default::default()
+            }),
+        )?;
+        ctx.SetTarget(&t);
+        Ok(t)
+    }
+}
+
 impl Surface {
+    pub fn resize(&mut self, w: i32, h: i32) -> Result<()> {
+        unsafe {
+            self.ctx.SetTarget(None);
+            self.target = None;
+            self.swap.ResizeBuffers(0, w as u32, h as u32, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
+            self.target = Some(target(&self.ctx, &self.swap)?);
+        }
+        Ok(())
+    }
+
     /// Draw one frame. Err means the GPU device is gone.
     pub fn frame(&self, g: &Gfx, vsync: bool, draw: impl FnOnce(&Canvas)) -> Result<()> {
         unsafe {
-            self.ctx.SetTarget(&self.target);
+            match &self.target {
+                Some(t) => self.ctx.SetTarget(t),
+                None => return Err(windows::Win32::Foundation::E_FAIL.into()),
+            }
             self.ctx.BeginDraw();
             self.ctx.SetTransform(&Matrix3x2::identity());
             self.ctx.Clear(Some(&rgba(0, 0.0)));
@@ -401,6 +421,19 @@ impl Canvas<'_> {
 
     pub fn text(&self, s: &str, r: R, size: f32, hex: u32, a: f32, al: Align) {
         self.text_w(s, r, size, 500, hex, a, al)
+    }
+
+    /// Wrapped text from the top left; what doesn't fit is cut.
+    pub fn para(&self, s: &str, r: R, size: f32, hex: u32, a: f32) {
+        unsafe {
+            let t: Vec<u16> = s.encode_utf16().collect();
+            let f = self.g.format(size, false, 450);
+            let Ok(l) = self.g.dw.CreateTextLayout(&t, &f, r.w, r.h) else { return };
+            let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+            let _ = l.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            let _ = l.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            self.ctx.DrawTextLayout(Vector2 { X: r.x, Y: r.y }, &l, &self.brush(hex, a), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
     }
 
     pub fn icon(&self, glyph: u16, r: R, size: f32, hex: u32, a: f32) {

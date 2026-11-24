@@ -244,11 +244,77 @@ pub fn window_rect(h: HWND) -> Option<RECT> {
     (r.right - r.left > 8 && r.bottom - r.top > 8).then_some(r)
 }
 
+#[derive(Clone, Copy)]
+pub struct Win {
+    pub rect: RECT,
+    hwnd: isize,
+}
+
+/// The app most of a rectangle belongs to: whatever is frontmost at its middle.
+pub fn app_at(wins: &[Win], r: RECT) -> String {
+    let p = POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+    wins.iter().find(|w| inside(&w.rect, p)).map(|w| app_name(HWND(w.hwnd as *mut _))).unwrap_or_default()
+}
+
+pub fn exe_path(h: HWND) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Threading::*;
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut b = [0u16; 600];
+        let mut len = b.len() as u32;
+        let ok = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, windows::core::PWSTR(b.as_mut_ptr()), &mut len);
+        let _ = windows::Win32::Foundation::CloseHandle(p);
+        ok.ok()?;
+        Some(String::from_utf16_lossy(&b[..len as usize]).into())
+    }
+}
+
+/// "Google Chrome", from the program's own description.
+pub fn app_name(h: HWND) -> String {
+    use windows::Win32::Storage::FileSystem::*;
+    use windows::core::{HSTRING, w};
+    let Some(path) = exe_path(h) else { return String::new() };
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    if stem.eq_ignore_ascii_case("ApplicationFrameHost") {
+        let mut b = [0u16; 128];
+        let n = unsafe { GetWindowTextW(h, &mut b) } as usize;
+        return String::from_utf16_lossy(&b[..n]);
+    }
+    if stem.eq_ignore_ascii_case("explorer") {
+        return "Explorer".into();
+    }
+    let described = unsafe {
+        let file = HSTRING::from(path.as_os_str());
+        let n = GetFileVersionInfoSizeW(&file, None);
+        let mut buf = vec![0u8; n as usize];
+        (|| {
+            if n == 0 {
+                return None;
+            }
+            GetFileVersionInfoW(&file, None, n, buf.as_mut_ptr() as *mut _).ok()?;
+            let (mut p, mut len) = (std::ptr::null_mut(), 0u32);
+            VerQueryValueW(buf.as_ptr() as *const _, w!("\\VarFileInfo\\Translation"), &mut p, &mut len).ok().ok()?;
+            if len < 4 {
+                return None;
+            }
+            let t = *(p as *const [u16; 2]);
+            let key = HSTRING::from(format!("\\StringFileInfo\\{:04x}{:04x}\\FileDescription", t[0], t[1]));
+            VerQueryValueW(buf.as_ptr() as *const _, &key, &mut p, &mut len).ok().ok()?;
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p as *const u16, len as usize));
+            let s = s.trim_end_matches('\0').trim().to_string();
+            (!s.is_empty() && s.chars().count() <= 32).then_some(s)
+        })()
+    };
+    described.unwrap_or(stem)
+}
+
 /// Top-level windows, front to back, skipping our own process.
-pub fn windows() -> Vec<RECT> {
+pub fn windows() -> Vec<Win> {
     unsafe extern "system" fn each(h: HWND, out: LPARAM) -> BOOL {
         unsafe {
-            let list = &mut *(out.0 as *mut Vec<RECT>);
+            let list = &mut *(out.0 as *mut Vec<Win>);
             if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
                 return BOOL(1);
             }
@@ -264,12 +330,12 @@ pub fn windows() -> Vec<RECT> {
                 return BOOL(1);
             }
             if let Some(r) = window_rect(h) {
-                list.push(r);
+                list.push(Win { rect: r, hwnd: h.0 as isize });
             }
         }
         BOOL(1)
     }
-    let mut v: Vec<RECT> = Vec::new();
+    let mut v: Vec<Win> = Vec::new();
     unsafe {
         let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize));
     }

@@ -25,10 +25,12 @@ pub enum Mode {
     Interval,
     Text,
     Color,
+    Clip,
+    Float,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 10] = [
+    pub const ALL: [Mode; 12] = [
         Mode::Region,
         Mode::Window,
         Mode::Screen,
@@ -39,12 +41,14 @@ impl Mode {
         Mode::Interval,
         Mode::Text,
         Mode::Color,
+        Mode::Clip,
+        Mode::Float,
     ];
     pub fn index(self) -> usize {
         Mode::ALL.iter().position(|m| *m == self).unwrap()
     }
     fn draws(self) -> bool {
-        matches!(self, Mode::Region | Mode::Window)
+        matches!(self, Mode::Region | Mode::Window | Mode::Float)
     }
 }
 
@@ -53,6 +57,7 @@ pub enum Tool {
     Region,
     Blur,
     Pixelate,
+    Erase,
     Box,
     Arrow,
     Pen,
@@ -61,10 +66,18 @@ pub enum Tool {
     Step,
 }
 
-const TOOLS: [(Tool, u16); 9] = [
+impl Tool {
+    /// Tools that take pixels away, and can aim at a word.
+    fn hides(self) -> bool {
+        matches!(self, Tool::Blur | Tool::Pixelate | Tool::Erase)
+    }
+}
+
+const TOOLS: [(Tool, u16); 10] = [
     (Tool::Region, b'R' as u16),
     (Tool::Blur, b'B' as u16),
     (Tool::Pixelate, b'P' as u16),
+    (Tool::Erase, b'E' as u16),
     (Tool::Box, b'X' as u16),
     (Tool::Arrow, b'A' as u16),
     (Tool::Pen, b'D' as u16),
@@ -82,6 +95,8 @@ enum Shape {
     Mark(Vec<POINT>),
     Text(String),
     Step(usize),
+    /// Brushing something away; pixels change when it ends.
+    Wipe(Vec<POINT>),
     /// Pixels already overwritten; what they were, per monitor, for undo only.
     Patch(Vec<(usize, RECT, Frame)>),
 }
@@ -99,6 +114,7 @@ struct Anno {
 #[derive(Clone, Copy, PartialEq)]
 enum Bar {
     Tool(Tool),
+    Secrets,
     Color(usize),
     Undo,
     Cancel,
@@ -111,6 +127,8 @@ struct Pane {
     s: f32,
     dirty: bool,
     words: Arc<Mutex<Option<Vec<Word>>>>,
+    /// Emails, keys and the like, in pane pixels.
+    secrets: Arc<Mutex<Vec<RECT>>>,
     /// Frame rows changed since the last upload.
     stale: Option<RECT>,
 }
@@ -128,7 +146,7 @@ pub struct Overlay {
     mons: Vec<Monitor>,
     frames: Vec<Frame>,
     panes: Vec<Pane>,
-    wins: Vec<RECT>,
+    wins: Vec<Win>,
     prev: HWND,
     home: usize,
     cur: POINT,
@@ -160,6 +178,11 @@ fn rect(a: POINT, b: POINT) -> RECT {
 
 fn wh(r: &RECT) -> (i32, i32) {
     (r.right - r.left, r.bottom - r.top)
+}
+
+fn covers(a: &RECT, b: &RECT) -> bool {
+    let p = POINT { x: (b.left + b.right) / 2, y: (b.top + b.bottom) / 2 };
+    inside(a, p)
 }
 
 impl Overlay {
@@ -218,6 +241,7 @@ impl Overlay {
                 s: m.dpi as f32 / 96.0,
                 dirty: true,
                 words: Default::default(),
+                secrets: Default::default(),
                 stale: None,
             });
         }
@@ -332,6 +356,10 @@ impl Overlay {
     }
 
     // ── Result ─────────────────────────────────────────────────────────────
+
+    pub fn app(&self, r: RECT) -> String {
+        app_at(&self.wins, r)
+    }
 
     /// Final pixels of a desktop rectangle, drawings included.
     pub fn take(&mut self, g: &Gfx, r: RECT) -> Frame {
@@ -470,8 +498,8 @@ impl Overlay {
         let desk = desktop(&self.mons);
         self.wins
             .iter()
-            .find(|r| inside(r, self.cur))
-            .and_then(|r| intersect(r, &desk))
+            .find(|w| inside(&w.rect, self.cur))
+            .and_then(|w| intersect(&w.rect, &desk))
             .or_else(|| self.mons.iter().find(|m| m.has(self.cur)).map(|m| m.rect))
     }
 
@@ -498,8 +526,15 @@ impl Overlay {
                 c.stroke(r, 0.0, 1.5, INK, 0.9);
             }
         }
-        // Words the blur tool can snap to
-        if matches!(self.tool, Tool::Blur | Tool::Pixelate) && self.live.is_none() && m.has(self.cur) {
+        if self.tool.hides() && self.live.is_none() {
+            for r in self.panes[n].secrets.lock().unwrap().iter() {
+                let r = R::new(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32);
+                c.fill(r, 4.0 * s, RED, 0.14);
+                c.stroke(r, 4.0 * s, 1.5 * s, RED, 1.0);
+            }
+        }
+        // Words these tools can snap to
+        if self.tool.hides() && self.live.is_none() && m.has(self.cur) && self.bar_hover.is_none() {
             if let Some(r) = self.word(n) {
                 let r = R::new(r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32);
                 c.fill(r, 4.0 * s, BLUE, 0.28);
@@ -609,7 +644,12 @@ impl Overlay {
             };
             put(Bar::Tool(t), w, &mut x);
         }
-        if !matches!(self.tool, Tool::Region | Tool::Blur | Tool::Pixelate) {
+        let found = self.found();
+        if self.tool.hides() && found > 0 {
+            x += 8.0;
+            put(Bar::Secrets, g.measure(&format!("Hide {found}"), 13.0, 600) + 26.0, &mut x);
+        }
+        if self.tool != Tool::Region && !self.tool.hides() {
             x += 8.0;
             for n in 0..COLORS.len() {
                 put(Bar::Color(n), 24.0, &mut x);
@@ -665,7 +705,10 @@ impl Overlay {
             let on = b == Bar::Tool(self.tool);
             let hov = self.bar_hover == Some(b);
             let ink = if on { BLACK } else { INK };
-            if !matches!(b, Bar::Color(_)) {
+            if b == Bar::Secrets {
+                c.fill(r, 18.0, RED, if hov { 1.0 } else { 0.88 });
+                c.text_w(&format!("Hide {}", self.found()), r, 13.0, 600, BLACK, 1.0, Align::Center);
+            } else if !matches!(b, Bar::Color(_)) {
                 if on {
                     c.fill(r, 18.0, INK, 1.0);
                 } else if hov {
@@ -677,6 +720,8 @@ impl Overlay {
                 Bar::Tool(Tool::Region) => c.icon(0xE7A8, r, 16.0, ink, 1.0),
                 Bar::Tool(Tool::Blur) => c.text("Blur", r, 13.0, ink, 1.0, Align::Center),
                 Bar::Tool(Tool::Pixelate) => c.text("Pixelate", r, 13.0, ink, 1.0, Align::Center),
+                Bar::Tool(Tool::Erase) => c.icon(0xE75C, r, 16.0, ink, 1.0),
+                Bar::Secrets => {}
                 Bar::Tool(Tool::Box) => c.stroke(R::new(cx - 8.0, cy - 6.0, 16.0, 12.0), 2.0, 1.6, ink, 1.0),
                 Bar::Tool(Tool::Arrow) => arrow(c, (cx - 7.0, cy + 7.0), (cx + 7.0, cy - 7.0), 1.6, ink, 1.0),
                 Bar::Tool(Tool::Pen) => c.icon(0xE70F, r, 15.0, ink, 1.0),
@@ -706,11 +751,27 @@ impl Overlay {
 
     fn pick(&mut self, t: Tool) {
         self.commit_live();
+        // Asking twice means: everything you found.
+        if t == self.tool && t.hides() && self.found() > 0 {
+            self.hide_secrets();
+        }
         self.tool = t;
-        if matches!(t, Tool::Blur | Tool::Pixelate) {
+        if t.hides() {
             self.start_ocr();
         }
         self.touch();
+    }
+
+    fn found(&self) -> usize {
+        self.panes.iter().map(|p| p.secrets.lock().unwrap().len()).sum()
+    }
+
+    fn hide_secrets(&mut self) {
+        let mut all = Vec::new();
+        for (n, p) in self.panes.iter().enumerate() {
+            all.extend(p.secrets.lock().unwrap().drain(..).map(|r| (n, r)));
+        }
+        self.hide(all);
     }
 
     fn start_ocr(&mut self) {
@@ -718,10 +779,14 @@ impl Overlay {
             return;
         }
         for (p, f) in self.panes.iter().zip(&self.frames) {
-            let (out, f) = (p.words.clone(), f.clone());
+            let (out, secrets, f) = (p.words.clone(), p.secrets.clone(), f.clone());
             let hwnd = p.hwnd.0 as isize;
             std::thread::spawn(move || {
                 let w = crate::ocr::words(&f).unwrap_or_default();
+                *secrets.lock().unwrap() = crate::secrets::find(&w)
+                    .into_iter()
+                    .map(|r| redact::padded(crate::secrets::snug(&f, &w, r)))
+                    .collect();
                 *out.lock().unwrap() = Some(w);
                 unsafe {
                     let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_NULL, WPARAM(0), LPARAM(0));
@@ -734,20 +799,68 @@ impl Overlay {
     fn word(&self, n: usize) -> Option<RECT> {
         let m = self.mons[n].rect;
         let p = POINT { x: self.cur.x - m.left, y: self.cur.y - m.top };
+        // A found secret is one target, however many words it spans.
+        if let Some(r) = self.panes[n].secrets.lock().unwrap().iter().find(|r| inside(r, p)) {
+            return Some(*r);
+        }
         redact::word_at(self.panes[n].words.lock().unwrap().as_ref()?, p)
     }
 
+    /// The word under the cursor. False if there is none.
+    fn hide_word(&mut self) -> bool {
+        let Some(n) = self.mons.iter().position(|m| m.has(self.cur)) else { return false };
+        let Some(r) = self.word(n) else { return false };
+        self.hide(vec![(n, r)]);
+        true
+    }
+
+    /// A desktop rectangle, on whichever monitors it touches.
     fn hide_pixels(&mut self, r: RECT) {
-        let smooth = self.tool == Tool::Blur;
+        let parts = self
+            .mons
+            .iter()
+            .enumerate()
+            .map(|(n, m)| {
+                let m = m.rect;
+                (n, RECT { left: r.left - m.left, top: r.top - m.top, right: r.right - m.left, bottom: r.bottom - m.top })
+            })
+            .collect();
+        self.hide(parts);
+    }
+
+    /// Pane rectangles, as one undo step.
+    fn hide(&mut self, parts: Vec<(usize, RECT)>) {
         let mut patches = Vec::new();
-        for n in 0..self.mons.len() {
-            let m = self.mons[n].rect;
-            let local = RECT { left: r.left - m.left, top: r.top - m.top, right: r.right - m.left, bottom: r.bottom - m.top };
-            if let Some((rr, before)) = redact::apply(&mut self.frames[n], local, smooth) {
+        for (n, r) in parts {
+            let f = &mut self.frames[n];
+            let did = match self.tool {
+                Tool::Erase => redact::erase_rect(f, r),
+                t => redact::apply(f, r, t == Tool::Blur),
+            };
+            if let Some((rr, before)) = did {
+                // Nothing left to find there.
+                self.panes[n].secrets.lock().unwrap().retain(|s| !covers(&rr, s));
                 self.mark_stale(n, rr);
                 patches.push((n, rr, before));
             }
         }
+        self.push_patch(patches);
+    }
+
+    fn wipe(&mut self, pts: &[POINT], rad: f32) {
+        let mut patches = Vec::new();
+        for n in 0..self.mons.len() {
+            let m = self.mons[n].rect;
+            let local: Vec<POINT> = pts.iter().map(|p| POINT { x: p.x - m.left, y: p.y - m.top }).collect();
+            if let Some((r, before)) = redact::erase(&mut self.frames[n], &local, rad) {
+                self.mark_stale(n, r);
+                patches.push((n, r, before));
+            }
+        }
+        self.push_patch(patches);
+    }
+
+    fn push_patch(&mut self, patches: Vec<(usize, RECT, Frame)>) {
         if !patches.is_empty() {
             let p = POINT::default();
             self.annos.push(Anno { shape: Shape::Patch(patches), a: p, b: p, color: 0, width: 0.0, s: 1.0 });
@@ -774,7 +887,7 @@ impl Overlay {
             self.typing = false;
         } else if let Some(a) = self.annos.pop() {
             if let Shape::Patch(list) = a.shape {
-                for (n, r, before) in list {
+                for (n, r, before) in list.into_iter().rev() {
                     self.frames[n].paste(&before, r.left, r.top);
                     self.mark_stale(n, r);
                 }
@@ -791,7 +904,7 @@ impl Overlay {
             Shape::Pen(p) | Shape::Mark(p) => p.len() > 1,
             Shape::Box | Shape::Arrow => (a.a.x - a.b.x).abs() + (a.a.y - a.b.y).abs() > 4,
             Shape::Step(_) => true,
-            Shape::Patch(_) => false,
+            Shape::Patch(_) | Shape::Wipe(_) => false,
         };
         if keep {
             self.annos.push(a);
@@ -891,7 +1004,7 @@ impl Overlay {
         if !self.typing {
             if let Some(a) = &mut self.live {
                 a.b = cur;
-                if let Shape::Pen(p) | Shape::Mark(p) = &mut a.shape {
+                if let Shape::Pen(p) | Shape::Mark(p) | Shape::Wipe(p) = &mut a.shape {
                     p.push(cur);
                 }
             }
@@ -910,6 +1023,7 @@ impl Overlay {
                     }
                 }
                 Some(Bar::Undo) => self.undo(),
+                Some(Bar::Secrets) => self.hide_secrets(),
                 Some(Bar::Cancel) => return Outcome::Cancel,
                 None => {}
             }
@@ -929,6 +1043,12 @@ impl Overlay {
         match self.tool {
             Tool::Region => self.start = Some(p),
             Tool::Blur | Tool::Pixelate => self.live = Some(mk(Shape::Patch(Vec::new()))),
+            Tool::Erase => {
+                let hex = self.pixel().unwrap_or(0);
+                let mut a = mk(Shape::Wipe(vec![p]));
+                a.color = hex;
+                self.live = Some(a);
+            }
             Tool::Box => self.live = Some(mk(Shape::Box)),
             Tool::Arrow => self.live = Some(mk(Shape::Arrow)),
             Tool::Pen => self.live = Some(mk(Shape::Pen(vec![p]))),
@@ -969,26 +1089,27 @@ impl Overlay {
         if self.typing {
             return Outcome::None;
         }
-        if let Some(a) = &self.live {
-            if matches!(a.shape, Shape::Patch(_)) {
-                let r = rect(a.a, a.b);
+        match self.live.as_ref().map(|a| (&a.shape, rect(a.a, a.b))) {
+            Some((Shape::Patch(_), r)) => {
                 self.live = None;
                 let (w, h) = wh(&r);
                 if w > 5 || h > 5 {
                     self.hide_pixels(r);
-                } else if let Some(n) = self.mons.iter().position(|m| m.has(self.cur)) {
-                    if let Some(q) = self.word(n) {
-                        let m = self.mons[n].rect;
-                        self.hide_pixels(RECT {
-                            left: q.left + m.left,
-                            top: q.top + m.top,
-                            right: q.right + m.left,
-                            bottom: q.bottom + m.top,
-                        });
-                    }
+                } else {
+                    self.hide_word();
                 }
                 return Outcome::None;
             }
+            Some((Shape::Wipe(p), _)) => {
+                let p = p.clone();
+                let a = self.live.take().unwrap();
+                let moved = p.iter().any(|q| (q.x - p[0].x).abs() + (q.y - p[0].y).abs() > 5);
+                if moved || !self.hide_word() {
+                    self.wipe(&p, a.width * 2.5 * a.s);
+                }
+                return Outcome::None;
+            }
+            _ => {}
         }
         self.commit_live();
         Outcome::None
@@ -1061,6 +1182,12 @@ fn paint(c: &Canvas, a: &Anno, ox: f32, oy: f32, al: f32) {
     let w = a.width * a.s;
     match &a.shape {
         Shape::Patch(_) => {}
+        Shape::Wipe(v) => {
+            let pts: Vec<_> = v.iter().map(|q| p(*q)).collect();
+            let r = w * 2.5;
+            c.circle(pts[0].0, pts[0].1, r, a.color, al);
+            c.poly(&pts, r * 2.0, a.color, al, false);
+        }
         Shape::Box => {
             let r = rect(a.a, a.b);
             let (x, y) = p(POINT { x: r.left, y: r.top });

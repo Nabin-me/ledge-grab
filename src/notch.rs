@@ -3,7 +3,7 @@ use crate::anim::{Anim, Curve};
 use crate::capture::{Frame, Monitor, cursor, monitors};
 use crate::gfx::*;
 use crate::overlay::Mode;
-use crate::store::{Kind, Store};
+use crate::store::{Filter, Kind, Store};
 use crate::{App, T_DWELL, T_FLASH, T_LEAVE, WM_DRAG_OUT, testing};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -34,6 +34,7 @@ mod glyph {
     pub const UNPIN: u16 = 0xE77A;
     pub const TRASH: u16 = 0xE74D;
     pub const NEXT: u16 = 0xE72A;
+    pub const BACK: u16 = 0xE72B;
     pub const CHECK: u16 = 0xE73E;
     pub const PINNED: u16 = 0xE841;
 }
@@ -49,6 +50,8 @@ pub enum View {
     Flash(i64),
     Count(i64),
     Done,
+    /// Recording a clip.
+    Rec,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -61,15 +64,22 @@ pub enum Btn {
     Delete,
     More,
     Merge,
+    Backdrop,
+    Float,
+    Gif,
+    Queue,
     Stack,
     Unstack,
     Go(Mode),
     Stop,
+    StopRec,
+    Filter(usize),
     Settings,
     Quit,
     Key(usize),
     Folder,
     Step(usize, i64),
+    History,
     Login,
 }
 
@@ -123,29 +133,87 @@ pub struct Notch {
     /// Hotkey row waiting for keys.
     pub recording: Option<usize>,
     pub modal: bool,
+    /// When the clip being recorded began.
+    pub rec: Option<Instant>,
     hidden: bool,
     dirty: bool,
+    /// A background job is running.
+    pub working: bool,
     tracking: bool,
     /// Last mouse position, island-local.
     mouse: (f32, f32),
+    born: Instant,
+}
+
+fn groups(st: &Store, v: View) -> Vec<Vec<i64>> {
+    match v {
+        View::Shelf => st.shelf(),
+        _ => st.recent(),
+    }
+}
+
+fn group_of(st: &Store, v: View, id: i64) -> Vec<i64> {
+    groups(st, v).into_iter().find(|g| g.contains(&id)).unwrap_or(vec![id])
+}
+
+/// Cut to a width, with an ellipsis.
+fn fitted(g: &Gfx, s: &str, size: f32, w: f32) -> String {
+    if g.measure(s, size, 500) <= w {
+        return s.into();
+    }
+    let mut t: String = s.into();
+    while !t.is_empty() && g.measure(&format!("{t}…"), size, 500) > w {
+        t.pop();
+    }
+    t.trim_end().to_string() + "…"
+}
+
+fn clock(s: i64) -> String {
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Shelf filters worth offering.
+fn filters(st: &Store) -> Vec<(usize, &'static str)> {
+    let mut v = vec![(0, "All")];
+    if st.has(|i| matches!(i.kind, Kind::Clip | Kind::Gif)) {
+        v.push((1, "Clips"));
+    }
+    if st.has(|i| i.kind == Kind::Text) {
+        v.push((2, "Text"));
+    }
+    if st.has(|i| !i.app.is_empty() && i.kind != Kind::Text) {
+        v.push((3, "Apps"));
+    }
+    v
 }
 
 pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
-    let n = st.groups().len();
+    let n = match v {
+        View::Peek | View::Shelf => groups(st, v).len(),
+        _ => 0,
+    };
     match v {
         View::Rest => (210.0, 9.0, 6.0),
         View::Peek => {
             let k = n.min(3) as f32;
             let tiles = k * TILE.0 + (k - 1.0).max(0.0) * GAP;
-            if n == 0 { (96.0, 60.0, 22.0) } else { (PAD * 2.0 + tiles + 46.0, 116.0, 26.0) }
+            if n == 0 && !st.items.is_empty() {
+                // Only copied text so far: no tiles here, but the shelf has some.
+                (PAD * 2.0 + 80.0, 60.0, 22.0)
+            } else if n == 0 {
+                (96.0, 60.0, 22.0)
+            } else {
+                (PAD * 2.0 + tiles + 46.0, 116.0, 26.0)
+            }
         }
         View::Shelf => {
             let rows = n.div_ceil(COLS).clamp(1, ROWS) as f32;
             let w = PAD * 2.0 + COLS as f32 * TILE.0 + (COLS - 1) as f32 * GAP;
             (w, PAD + rows * (TILE.1 + GAP) + BAR, 28.0)
         }
-        View::Menu => (424.0, PAD * 2.0 + 6.0 * 38.0 + 4.0, 28.0),
-        View::Settings => (400.0, PAD * 2.0 + 8.0 * 40.0 + 2.0, 28.0),
+        View::Menu => (424.0, PAD * 2.0 + 7.0 * 38.0 + 4.0, 28.0),
+        View::Settings => (400.0, PAD * 2.0 + 10.0 * 40.0 + 2.0, 28.0),
+        View::Rec => (118.0, 36.0, 16.0),
         View::Flash(_) => (TILE.0 + PAD * 2.0, 116.0, 26.0),
         View::Count(_) | View::Done => {
             let _ = g;
@@ -250,10 +318,13 @@ impl Notch {
                 failed: None,
                 recording: None,
                 modal: false,
+                rec: None,
                 hidden: false,
                 dirty: true,
+                working: false,
                 tracking: false,
                 mouse: (0.0, 0.0),
+                born: Instant::now(),
             })
         }
     }
@@ -320,9 +391,8 @@ impl Notch {
         if moved {
             self.mon = mon;
             self.s = mon.dpi as f32 / 96.0;
-            if let Ok(s) = g.surface(self.win, (WIN.0 * self.s) as i32, (WIN.1 * self.s) as i32) {
-                self.surf = s;
-            }
+            let _ = g;
+            let _ = self.surf.resize((WIN.0 * self.s) as i32, (WIN.1 * self.s) as i32);
         }
         if moved || shift != self.shift {
             self.shift = shift;
@@ -352,6 +422,7 @@ impl Notch {
     }
 
     pub fn show(&mut self, g: &Gfx, st: &Store, v: View) {
+        let v = if v == View::Rest && self.rec.is_some() { View::Rec } else { v };
         let (w, h, r) = size(g, st, v);
         let same = std::mem::discriminant(&v) == std::mem::discriminant(&self.view)
             && !matches!(v, View::Flash(_) | View::Count(_));
@@ -359,7 +430,7 @@ impl Notch {
             self.prev = Some(self.view);
             self.swap = Instant::now();
             self.more = false;
-            if matches!(v, View::Rest) {
+            if matches!(v, View::Rest | View::Rec) {
                 self.sel.clear();
                 self.scroll.jump(0.0);
                 self.recording = None;
@@ -385,7 +456,7 @@ impl Notch {
 
     pub fn flash(&mut self, g: &Gfx, st: &Store, id: i64) {
         match self.view {
-            View::Rest | View::Flash(_) | View::Count(_) | View::Done => {
+            View::Rest | View::Flash(_) | View::Count(_) | View::Done | View::Rec => {
                 self.show(g, st, View::Flash(id));
                 unsafe {
                     SetTimer(Some(self.sensor), T_FLASH, 1500, None);
@@ -423,12 +494,12 @@ impl Notch {
 
     /// Drop thumbnails nobody will look at soon.
     pub fn trim(&mut self, st: &Store) {
-        let keep: Vec<i64> = st.groups().iter().take(3).map(|g| g[0]).collect();
+        let keep: Vec<i64> = st.recent().iter().take(3).map(|g| g[0]).collect();
         self.thumbs.retain(|i, _| keep.contains(i));
     }
 
     fn max_scroll(&self, st: &Store) -> f32 {
-        let rows = st.groups().len().div_ceil(COLS);
+        let rows = st.shelf().len().div_ceil(COLS);
         rows.saturating_sub(ROWS) as f32 * (TILE.1 + GAP)
     }
 
@@ -443,7 +514,7 @@ impl Notch {
 
     fn tile_rects(&self, st: &Store, v: View, now: Instant) -> Vec<(i64, R)> {
         let y0 = PAD;
-        st.groups()
+        groups(st, v)
             .iter()
             .enumerate()
             .filter_map(|(n, g)| match v {
@@ -468,22 +539,31 @@ impl Notch {
 
     fn actions(&self, g: &Gfx, st: &Store) -> Vec<(Btn, &'static str, f32)> {
         let items: Vec<_> = self.sel.iter().filter_map(|i| st.get(*i)).collect();
+        let all = |k: Kind| !items.is_empty() && items.iter().all(|i| i.kind == k);
+        let many = items.len() > 1;
         let mut v = Vec::new();
-        if items.iter().all(|i| i.kind == Kind::Shot) {
-            v.push((Btn::Merge, if items.len() > 1 { "Merge as PDF" } else { "Convert to PDF" }));
+        if all(Kind::Shot) {
+            v.push((Btn::Merge, if many { "Merge as PDF" } else { "Convert to PDF" }));
+            v.push((Btn::Backdrop, "Background"));
+            v.push((Btn::Float, "Float"));
+        }
+        if all(Kind::Clip) {
+            v.push((Btn::Gif, "GIF"));
+        }
+        if many {
+            v.push((Btn::Queue, "Queue"));
         }
         let stacks: Vec<i64> = items.iter().map(|i| i.stack).collect();
         let one = !stacks.is_empty() && stacks[0] != 0 && stacks.iter().all(|s| *s == stacks[0]);
-        if items.len() > 1 && !one {
+        if many && !one {
             v.push((Btn::Stack, "Stack"));
-        }
-        if stacks.iter().any(|s| *s != 0) {
+        } else if stacks.iter().any(|s| *s != 0) {
             v.push((Btn::Unstack, "Unstack"));
         }
-        v.into_iter().map(|(b, t)| (b, t, g.measure(t, 13.0, 500) + 26.0)).collect()
+        v.into_iter().map(|(b, t)| (b, t, g.measure(t, 13.0, 500) + 24.0)).collect()
     }
 
-    fn menu(app_interval: bool) -> Vec<(Btn, &'static str)> {
+    fn menu(app_interval: bool, rec: bool) -> Vec<(Btn, &'static str)> {
         let mut v: Vec<(Btn, &'static str)> = [
             (Mode::Region, "Region"),
             (Mode::Screen, "Screen"),
@@ -496,6 +576,8 @@ impl Notch {
         .map(|(m, t)| (Btn::Go(m), t))
         .to_vec();
         v.push(if app_interval { (Btn::Stop, "Stop") } else { (Btn::Go(Mode::Interval), "Interval") });
+        v.push(if rec { (Btn::StopRec, "Stop clip") } else { (Btn::Go(Mode::Clip), "Clip") });
+        v.push((Btn::Go(Mode::Float), "Float"));
         v.push((Btn::Go(Mode::Text), "Copy text"));
         v.push((Btn::Go(Mode::Color), "Pick color"));
         v.push((Btn::Settings, "Settings"));
@@ -512,6 +594,9 @@ impl Notch {
             View::Peek => {
                 if st.items.is_empty() {
                     b(&mut v, Btn::Capture, R::new(w / 2.0 - 18.0, 12.0, 36.0, 36.0));
+                } else if st.recent().is_empty() {
+                    b(&mut v, Btn::Capture, R::new(PAD, 12.0, 36.0, 36.0));
+                    b(&mut v, Btn::Open, R::new(w - PAD - 36.0, 12.0, 36.0, 36.0));
                 } else {
                     b(&mut v, Btn::Capture, R::new(w - PAD - 36.0, PAD + 3.0, 36.0, 36.0));
                     b(&mut v, Btn::Open, R::new(w - PAD - 36.0, PAD + 45.0, 36.0, 36.0));
@@ -523,48 +608,67 @@ impl Notch {
             View::Shelf => {
                 let y = h - 44.0;
                 b(&mut v, Btn::Close, R::new(w - PAD - 36.0, y, 36.0, 32.0));
-                b(&mut v, Btn::Capture, R::new(w - PAD - 78.0, y, 36.0, 32.0));
-                if !self.sel.is_empty() {
-                    let mut x = PAD;
-                    for k in [Btn::Copy, Btn::Pin, Btn::Delete, Btn::More] {
-                        b(&mut v, k, R::new(x, y, 36.0, 32.0));
-                        x += 42.0;
+                if self.more && !self.sel.is_empty() {
+                    b(&mut v, Btn::More, R::new(PAD, y, 36.0, 32.0));
+                    let mut x = PAD + 44.0;
+                    for (k, _, tw) in self.actions(g, st) {
+                        b(&mut v, k, R::new(x, y, tw, 32.0));
+                        x += tw + 5.0;
                     }
-                    if self.more {
-                        for (k, _, tw) in self.actions(g, st) {
-                            b(&mut v, k, R::new(x, y, tw, 32.0));
-                            x += tw + 6.0;
+                } else {
+                    b(&mut v, Btn::Capture, R::new(w - PAD - 78.0, y, 36.0, 32.0));
+                    let mut x = PAD;
+                    if !self.sel.is_empty() {
+                        for k in [Btn::Copy, Btn::Pin, Btn::Delete, Btn::More] {
+                            b(&mut v, k, R::new(x, y, 36.0, 32.0));
+                            x += 42.0;
+                        }
+                    } else if matches!(st.filter, Filter::App(_)) {
+                        b(&mut v, Btn::Filter(3), R::new(x, y, 36.0, 32.0));
+                    } else {
+                        let f = filters(st);
+                        if f.len() > 1 {
+                            for (k, t) in f {
+                                let tw = g.measure(t, 13.0, 500) + 24.0;
+                                b(&mut v, Btn::Filter(k), R::new(x, y, tw, 32.0));
+                                x += tw + 5.0;
+                            }
                         }
                     }
                 }
+                let apps = st.filter == Filter::Apps;
                 let clip = Self::shelf_clip(h, w);
                 for (id, r) in self.tile_rects(st, view, now) {
                     if r.y + r.h > clip.y && r.y < clip.y + clip.h {
-                        v.push(Spot { hit: Hit::Check(id), r: R::new(r.x + r.w - 30.0, r.y, 30.0, 30.0) });
+                        if !apps {
+                            v.push(Spot { hit: Hit::Check(id), r: R::new(r.x + r.w - 30.0, r.y, 30.0, 30.0) });
+                        }
                         v.push(Spot { hit: Hit::Tile(id), r });
                     }
                 }
             }
             View::Menu => {
                 let cw = (w - PAD * 2.0 - 8.0) / 2.0;
-                for (n, (k, _)) in Self::menu(app.interval.is_some()).into_iter().enumerate() {
-                    let (col, row) = (n / 6, n % 6);
+                for (n, (k, _)) in Self::menu(app.interval.is_some(), app.rec.is_some()).into_iter().enumerate() {
+                    let (col, row) = (n / 7, n % 7);
                     b(&mut v, k, R::new(PAD + col as f32 * (cw + 8.0), PAD + row as f32 * 38.0, cw, 36.0));
                 }
             }
             View::Settings => {
                 let right = w - PAD;
                 let row = |n: usize| PAD + n as f32 * 40.0 + 4.0;
-                for n in 0..3 {
+                for n in 0..4 {
                     b(&mut v, Btn::Key(n), R::new(right - 150.0, row(n), 150.0, 32.0));
                 }
-                b(&mut v, Btn::Folder, R::new(right - 150.0, row(3), 150.0, 32.0));
+                b(&mut v, Btn::Folder, R::new(right - 150.0, row(4), 150.0, 32.0));
                 for n in 0..3 {
-                    b(&mut v, Btn::Step(n, -1), R::new(right - 150.0, row(4 + n), 36.0, 32.0));
-                    b(&mut v, Btn::Step(n, 1), R::new(right - 36.0, row(4 + n), 36.0, 32.0));
+                    b(&mut v, Btn::Step(n, -1), R::new(right - 150.0, row(5 + n), 36.0, 32.0));
+                    b(&mut v, Btn::Step(n, 1), R::new(right - 36.0, row(5 + n), 36.0, 32.0));
                 }
-                b(&mut v, Btn::Login, R::new(right - 48.0, row(7), 48.0, 32.0));
+                b(&mut v, Btn::History, R::new(right - 48.0, row(8), 48.0, 32.0));
+                b(&mut v, Btn::Login, R::new(right - 48.0, row(9), 48.0, 32.0));
             }
+            View::Rec => b(&mut v, Btn::StopRec, R::new(0.0, 0.0, w, h)),
             _ => {}
         }
         v
@@ -576,9 +680,12 @@ impl Notch {
 
     fn drop_at(&self, st: &Store) -> Option<Drop> {
         let d = self.drag.as_ref()?;
+        if self.view == View::Shelf && st.filter == Filter::Apps {
+            return None;
+        }
         let (x, y) = self.mouse;
         let rects = self.tile_rects(st, self.view, Instant::now());
-        let groups = st.groups();
+        let groups = groups(st, self.view);
         for (n, (id, r)) in rects.iter().enumerate() {
             if r.grow(GAP / 2.0).has(x, y) {
                 if d.ids.contains(id) {
@@ -607,6 +714,7 @@ impl Notch {
                 || self.prev.is_some()
                 || self.copied.is_some()
                 || self.failed.is_some()
+                || self.working
                 || (now - self.swap).as_secs_f32() < 0.5
                 || self.lift.values().any(|a| a.busy(now)))
     }
@@ -614,6 +722,7 @@ impl Notch {
     pub fn draw(&mut self, app: &App) -> Result<()> {
         let now = Instant::now();
         self.dirty = false;
+        self.working = app.jobs > 0;
         let t = (now - self.swap).as_secs_f32();
         let (out, inn) = (t / 0.2, (t - 0.07) / 0.4);
         if out >= 1.0 {
@@ -640,7 +749,8 @@ impl Notch {
         let (view, prev, s) = (self.view, self.prev, self.s);
         let mut fresh: Vec<(i64, Frame)> = Vec::new();
         for id in need {
-            if !self.thumbs.contains_key(&id) {
+            let text = app.store.get(id).is_none_or(|i| i.kind == Kind::Text);
+            if !text && !self.thumbs.contains_key(&id) {
                 if let Some(f) = app.store.thumb(id) {
                     fresh.push((id, f));
                 }
@@ -678,6 +788,12 @@ impl Notch {
                     c.layer(10.0 * (1.0 - k), k, |c| me.content(c, app, view, now, &loaded, true));
                 }
                 c.transform(&base);
+                if me.working {
+                    let t = me.born.elapsed().as_secs_f32() * 0.9 % 1.0;
+                    let k = (t * std::f32::consts::PI).sin();
+                    let x = island.x + 16.0 + (island.w - 32.0 - 34.0) * Curve::Standard.at(t);
+                    c.fill(R::new(x, island.y + island.h - 4.0, 34.0, 2.0), 1.0, INK, 0.8 * k);
+                }
                 if let Some(t) = fail {
                     let k = (t * std::f32::consts::PI * 2.0).sin().abs();
                     c.fill(R::new(island.cx() - 24.0, island.y + island.h - 5.0, 48.0, 3.0), 1.5, RED, k);
@@ -713,6 +829,23 @@ impl Notch {
                 if app.interval.is_some() {
                     c.circle(w / 2.0, h / 2.0, 2.2, RED, 1.0);
                 }
+                // One dot for each thing left to paste.
+                let left = app.queue.len().min(14);
+                let x0 = w / 2.0 - (left as f32 - 1.0) * 4.5;
+                for k in 0..left {
+                    c.circle(x0 + k as f32 * 9.0, h / 2.0, 2.2, INK, if k == 0 { 1.0 } else { 0.5 });
+                }
+            }
+            View::Rec => {
+                let s = self.rec.map_or(0, |t| (now - t).as_secs() as i64);
+                let r = R::new(16.0, h / 2.0 - 6.0, 12.0, 12.0);
+                if hover(Btn::StopRec) {
+                    c.fill(r, 2.5, RED, 1.0);
+                } else {
+                    let t = self.rec.map_or(0.0, |t| (now - t).as_secs_f32());
+                    c.circle(r.cx(), r.cy(), 5.0, RED, 0.65 + 0.35 * (t * std::f32::consts::PI).cos().abs());
+                }
+                c.text_w(&clock(s), R::new(0.0, 0.0, w - 18.0, h), 14.0, 600, INK, 1.0, Align::Right);
             }
             View::Flash(id) => {
                 self.tile(c, app, id, R::new(PAD, PAD, TILE.0, TILE.1), now, extra, false, 1.0);
@@ -747,47 +880,80 @@ impl Notch {
                 }
                 round(Btn::Capture, glyph::ADD, INK);
                 round(Btn::Close, glyph::UP, INK);
-                if !self.sel.is_empty() && live {
+                if live {
                     let pinned = self.sel.iter().all(|i| app.store.get(*i).is_some_and(|i| i.pinned));
                     round(Btn::Copy, glyph::COPY, INK);
                     round(Btn::Pin, if pinned { glyph::UNPIN } else { glyph::PIN }, INK);
                     round(Btn::Delete, glyph::TRASH, if hover(Btn::Delete) { RED } else { INK });
-                    round(Btn::More, glyph::NEXT, INK);
-                    if self.more {
-                        for (b, t, _) in self.actions(&app.g, &app.store) {
-                            pill(b, t, INK);
+                    round(Btn::More, if self.more { glyph::BACK } else { glyph::NEXT }, INK);
+                    for (b, t, _) in self.actions(&app.g, &app.store) {
+                        pill(b, t, INK);
+                    }
+                }
+                if let (Filter::App(name), true) = (&app.store.filter, self.sel.is_empty()) {
+                    round(Btn::Filter(3), glyph::BACK, INK);
+                    if let Some(r) = at(Btn::Filter(3)) {
+                        c.text(name, R::new(r.x + 46.0, r.y, 260.0, r.h), 13.0, INK, 1.0, Align::Left);
+                    }
+                } else {
+                    let now_on = match app.store.filter {
+                        Filter::All => 0,
+                        Filter::Clips => 1,
+                        Filter::Text => 2,
+                        _ => 3,
+                    };
+                    for (k, t) in filters(&app.store) {
+                        if let Some(r) = at(Btn::Filter(k)) {
+                            let b = Btn::Filter(k);
+                            let r2 = if down(b) { r.scale(0.97) } else { r };
+                            let bg = if k == now_on { INK } else if hover(b) { PILL_HOVER } else { PILL };
+                            c.fill(r2, r2.h / 2.0, bg, 1.0);
+                            c.text(t, r2, 13.0, if k == now_on { BLACK } else { INK }, 1.0, Align::Center);
                         }
                     }
                 }
                 self.drag_layer(c, app, v, now, extra, live);
             }
             View::Menu => {
-                for (b, t) in Self::menu(app.interval.is_some()) {
+                for (b, t) in Self::menu(app.interval.is_some(), app.rec.is_some()) {
                     if let Some(r) = at(b) {
                         if hover(b) {
                             c.fill(r, 12.0, TAB, 1.0);
                         }
                         let hex = if matches!(b, Btn::Settings | Btn::Quit) { DIM } else { INK };
-                        c.text(t, R::new(r.x + 14.0, r.y, r.w, r.h), 14.0, if b == Btn::Stop { RED } else { hex }, 1.0, Align::Left);
+                        c.text(t, R::new(r.x + 14.0, r.y, r.w, r.h), 14.0, if matches!(b, Btn::Stop | Btn::StopRec) { RED } else { hex }, 1.0, Align::Left);
                         let key = match b {
                             Btn::Go(Mode::Region) => app.store.settings.region,
                             Btn::Go(Mode::Screen) => app.store.settings.screen,
                             Btn::Go(Mode::Window) => app.store.settings.window,
+                            Btn::Go(Mode::Clip) => app.store.settings.clip,
                             _ => continue,
                         };
-                        c.text(&key_name(key), R::new(r.x, r.y, r.w - 14.0, r.h), 12.0, DIM, 1.0, Align::Right);
+                        if key.1 != 0 {
+                            c.text(&key_name(key), R::new(r.x, r.y, r.w - 14.0, r.h), 12.0, DIM, 1.0, Align::Right);
+                        }
                     }
                 }
             }
             View::Settings => {
                 let s = &app.store.settings;
-                for (n, t) in
-                    ["Region", "Screen", "Window", "Folder", "Keep", "Delay", "Interval", "Launch at login"].iter().enumerate()
-                {
+                let rows = [
+                    "Region",
+                    "Screen",
+                    "Window",
+                    "Clip",
+                    "Folder",
+                    "Keep",
+                    "Delay",
+                    "Interval",
+                    "Clipboard history",
+                    "Launch at login",
+                ];
+                for (n, t) in rows.iter().enumerate() {
                     let y = PAD + n as f32 * 40.0;
                     c.text(t, R::new(PAD + 6.0, y, 200.0, 40.0), 14.0, INK, 1.0, Align::Left);
                 }
-                for (n, k) in [s.region, s.screen, s.window].into_iter().enumerate() {
+                for (n, k) in s.keys().into_iter().enumerate() {
                     let name = if self.recording == Some(n) { "Press keys".into() } else { key_name(k) };
                     let hex = if self.recording == Some(n) {
                         BLUE
@@ -817,8 +983,8 @@ impl Notch {
                         }
                     }
                 }
-                if let Some(r) = at(Btn::Login) {
-                    let on = app.login;
+                for (b, on) in [(Btn::History, s.history), (Btn::Login, app.login)] {
+                    let Some(r) = at(b) else { continue };
                     let t = R::new(r.x, r.y + 3.0, 46.0, 26.0);
                     c.fill(t, 13.0, if on { INK } else { PILL_HOVER }, 1.0);
                     c.circle(if on { t.x + 33.0 } else { t.x + 13.0 }, t.cy(), 9.5, if on { BLACK } else { DIM }, 1.0);
@@ -848,6 +1014,10 @@ impl Notch {
             None => {}
         }
         let r = R::new(d.at.0 - d.grab.0, d.at.1 - d.grab.1, TILE.0, TILE.1).scale(0.92);
+        if let Some(i) = app.store.get(d.ids[0]).filter(|i| i.kind == Kind::Text) {
+            c.fill(r, 10.0, CARD, 0.95);
+            c.para(&i.preview, r.grow(-10.0), 11.5, INK, 0.85);
+        }
         if let Some(b) = self.bitmap(d.ids[0], extra) {
             c.image_round(b, r, 10.0, 0.92);
         }
@@ -870,7 +1040,8 @@ impl Notch {
         alpha: f32,
     ) {
         let Some(item) = app.store.get(id) else { return };
-        let group: Vec<i64> = app.store.groups().into_iter().find(|g| g.contains(&id)).unwrap_or_default();
+        let group = group_of(&app.store, self.view, id);
+        let apps = checks && app.store.filter == Filter::Apps;
         let lifted = self.lift.get(&id).map(|a| a.get(now)).unwrap_or(0.0);
         let pressed = matches!(self.press, Some((Hit::Tile(p), ..)) if p == id);
         let dragged = self.drag.as_ref().is_some_and(|d| d.ids.contains(&id));
@@ -885,9 +1056,26 @@ impl Notch {
             c.image_round(b, r, 10.0, a);
         }
         c.stroke(r.grow(-0.5), 9.5, 1.0, INK, 0.10 * a);
+        if item.kind == Kind::Text && !apps {
+            c.para(&item.preview, R::new(r.x + 11.0, r.y + 9.0, r.w - 22.0, r.h - 18.0), 11.5, INK, 0.85 * a);
+        }
         if item.kind == Kind::Pdf {
             c.fill(r, 10.0, BLACK, 0.55 * a);
             c.text_w("PDF", r, 17.0, 600, INK, a, Align::Center);
+        }
+        if matches!(item.kind, Kind::Clip | Kind::Gif) {
+            let t = if item.kind == Kind::Gif { "GIF".into() } else { clock(item.secs) };
+            let p = R::new(r.x + 6.0, r.y + 6.0, app.g.measure(&t, 11.5, 600) + 14.0, 19.0);
+            c.fill(p, 9.5, BLACK, 0.78 * a);
+            c.text_w(&t, p, 11.5, 600, INK, a, Align::Center);
+        }
+        if apps {
+            let p = R::new(r.x, r.y + r.h - 28.0, r.w, 28.0);
+            c.clip(p, || c.fill(r, 10.0, BLACK, 0.82 * a));
+            let name = fitted(&app.g, &item.app, 12.0, p.w - 42.0);
+            c.text(&name, R::new(p.x + 10.0, p.y, p.w, p.h), 12.0, INK, a, Align::Left);
+            c.text_w(&group.len().to_string(), R::new(p.x, p.y, p.w - 10.0, p.h), 12.0, 600, DIM, a, Align::Right);
+            return;
         }
         if group.iter().any(|g| app.clip.contains(g)) {
             // Outside the tile, so it shows on white shots too.
@@ -932,7 +1120,7 @@ impl Notch {
 
     /// 1-based place of a tile in the selection.
     fn order(&self, app: &App, id: i64) -> usize {
-        let groups = app.store.groups();
+        let groups = groups(&app.store, self.view);
         let head = |i: i64| groups.iter().find(|g| g.contains(&i)).map(|g| g[0]).unwrap_or(i);
         let mut seen: Vec<i64> = Vec::new();
         for i in &self.sel {
@@ -1008,6 +1196,11 @@ impl Notch {
             View::Count(_) => return,
             _ => {}
         }
+        if self.view == View::Rec {
+            let h = self.hit(app, x, y);
+            self.set_hover(h);
+            return;
+        }
         if let Some(d) = &mut self.drag {
             d.at = (x, y);
             self.dirty = true;
@@ -1024,7 +1217,7 @@ impl Notch {
         }
         if let Some((Hit::Tile(id), px, py)) = self.press {
             if (x - px).hypot(y - py) > 6.0 {
-                let mut ids: Vec<i64> = app.store.groups().into_iter().find(|g| g.contains(&id)).unwrap_or(vec![id]);
+                let mut ids = group_of(&app.store, self.view, id);
                 if ids.iter().all(|i| self.sel.contains(i)) {
                     ids = self.sel.clone();
                     // Keep the grabbed tile on top.
@@ -1075,7 +1268,7 @@ impl Notch {
 
     pub fn down(&mut self, app: &App, l: LPARAM) {
         self.mouse = self.local(l);
-        if !self.expanded() {
+        if !self.expanded() && self.view != View::Rec {
             if matches!(self.view, View::Rest | View::Flash(_)) {
                 self.show(&app.g, &app.store, View::Peek);
             }
@@ -1103,7 +1296,7 @@ impl Notch {
             let d = self.drag.take().unwrap();
             match drop {
                 Some(Drop::Onto(id)) => {
-                    let mut ids = app.store.groups().into_iter().find(|g| g.contains(&id)).unwrap_or(vec![id]);
+                    let mut ids = group_of(&app.store, self.view, id);
                     let key = app.store.get(id).map(|i| i.stack).filter(|s| *s != 0).unwrap_or(id);
                     ids.extend(d.ids.iter().filter(|i| **i != id));
                     app.store.stack(&ids, key);
@@ -1126,7 +1319,15 @@ impl Notch {
         }
         match h {
             Hit::Tile(id) | Hit::Check(id) => {
-                let ids = app.store.groups().into_iter().find(|g| g.contains(&id)).unwrap_or(vec![id]);
+                if self.view == View::Shelf && app.store.filter == Filter::Apps {
+                    if let Some(a) = app.store.get(id).map(|i| i.app.clone()) {
+                        app.store.filter = Filter::App(a);
+                        self.scroll.jump(0.0);
+                        self.refresh(&app.g, &app.store);
+                    }
+                    return;
+                }
+                let ids = group_of(&app.store, self.view, id);
                 let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
                 if matches!(h, Hit::Check(_)) || ctrl {
                     if ids.iter().all(|i| self.sel.contains(i)) {
@@ -1149,9 +1350,9 @@ impl Notch {
     pub fn double(&mut self, app: &App, l: LPARAM) {
         let (x, y) = self.local(l);
         match self.hit(app, x, y) {
-            Some(Hit::Tile(id)) => {
-                if let Some(i) = app.store.get(id) {
-                    crate::clip::open_file(&i.path);
+            Some(Hit::Tile(id)) if self.view != View::Shelf || app.store.filter != Filter::Apps => {
+                if let Some(p) = app.file(id) {
+                    crate::clip::open_file(&p);
                 }
             }
             _ => self.down(app, l),
@@ -1162,9 +1363,12 @@ impl Notch {
         self.show(&app.g, &app.store, View::Menu);
     }
 
-    pub fn wheel(&mut self, app: &App, delta: f32) {
+    pub fn wheel(&mut self, app: &mut App, delta: f32) {
         match self.view {
-            View::Peek if delta < 0.0 && !app.store.items.is_empty() => self.show(&app.g, &app.store, View::Shelf),
+            View::Peek if delta < 0.0 && !app.store.items.is_empty() => {
+                app.store.filter = Filter::All;
+                self.show(&app.g, &app.store, View::Shelf);
+            }
             View::Shelf => {
                 let to = (self.scroll.to - delta / 120.0 * (TILE.1 + GAP)).clamp(0.0, self.max_scroll(&app.store));
                 self.scroll.go(to, 0.35, Curve::Emphasized);
@@ -1177,7 +1381,15 @@ impl Notch {
     fn button(&mut self, app: &mut App, b: Btn) {
         match b {
             Btn::Capture => self.show(&app.g, &app.store, View::Menu),
-            Btn::Open => self.show(&app.g, &app.store, View::Shelf),
+            Btn::Open => {
+                app.store.filter = Filter::All;
+                self.show(&app.g, &app.store, View::Shelf);
+            }
+            Btn::Filter(n) => {
+                app.store.filter = [Filter::All, Filter::Clips, Filter::Text, Filter::Apps][n].clone();
+                self.scroll.jump(0.0);
+                self.refresh(&app.g, &app.store);
+            }
             Btn::Close => self.show(&app.g, &app.store, View::Peek),
             Btn::Settings => self.show(&app.g, &app.store, View::Settings),
             Btn::More => self.more = !self.more,
@@ -1208,6 +1420,39 @@ impl Notch {
                     self.mark_copied(id);
                 }
             }
+            Btn::Backdrop => {
+                let ids = std::mem::take(&mut self.sel);
+                self.more = false;
+                match app.backdrop(&ids) {
+                    Some(id) => {
+                        self.scroll.go(0.0, 0.35, Curve::Emphasized);
+                        self.refresh(&app.g, &app.store);
+                        self.mark_copied(id);
+                    }
+                    None => self.fail(),
+                }
+            }
+            Btn::Float => {
+                let ids = std::mem::take(&mut self.sel);
+                let mon = self.mon;
+                self.show(&app.g, &app.store, View::Rest);
+                if !app.float(&ids, &mon) {
+                    self.fail();
+                }
+            }
+            Btn::Gif => {
+                let ids = std::mem::take(&mut self.sel);
+                self.more = false;
+                app.gif(&ids);
+            }
+            Btn::Queue => {
+                let ids = std::mem::take(&mut self.sel);
+                let ok = app.start_queue(&ids);
+                self.show(&app.g, &app.store, View::Rest);
+                if !ok {
+                    self.fail();
+                }
+            }
             Btn::Stack => {
                 let ids = std::mem::take(&mut self.sel);
                 app.store.stack(&ids, ids[0]);
@@ -1228,9 +1473,11 @@ impl Notch {
                 app.stop_interval();
                 self.show(&app.g, &app.store, View::Rest);
             }
-            Btn::Quit => unsafe {
-                let _ = DestroyWindow(self.sensor);
-            },
+            Btn::StopRec => {
+                app.stop_rec(self);
+                self.show(&app.g, &app.store, View::Rest);
+            }
+            Btn::Quit => app.quit(self),
             Btn::Key(n) => app.record_key(self, n),
             Btn::Folder => unsafe {
                 let _ = PostMessageW(Some(self.sensor), crate::WM_PICK_FOLDER, WPARAM(0), LPARAM(0));
@@ -1242,6 +1489,10 @@ impl Notch {
                     1 => s.delay = next(&[1, 2, 3, 5, 10], s.delay, d),
                     _ => s.interval = next(&[5, 10, 30, 60, 120, 300, 600, 1800, 3600], s.interval, d),
                 }
+                app.store.save_settings();
+            }
+            Btn::History => {
+                app.store.settings.history = !app.store.settings.history;
                 app.store.save_settings();
             }
             Btn::Login => {
