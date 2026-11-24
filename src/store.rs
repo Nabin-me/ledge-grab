@@ -8,11 +8,10 @@ pub const THUMB: (i32, i32) = (264, 168);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
-    Shot,
-    Pdf,
-    Clip,
-    Text,
-    Gif,
+    Shot = 0,
+    Pdf = 1,
+    Clip = 2,
+    Gif = 4,
 }
 
 impl Settings {
@@ -23,7 +22,12 @@ impl Settings {
 
 impl Kind {
     fn of(n: i64) -> Kind {
-        [Kind::Shot, Kind::Pdf, Kind::Clip, Kind::Text, Kind::Gif].get(n as usize).copied().unwrap_or(Kind::Shot)
+        match n {
+            1 => Kind::Pdf,
+            2 => Kind::Clip,
+            4 => Kind::Gif,
+            _ => Kind::Shot,
+        }
     }
 }
 
@@ -32,7 +36,6 @@ impl Kind {
 pub enum Filter {
     All,
     Clips,
-    Text,
     /// One stack per app.
     Apps,
     App(String),
@@ -49,8 +52,6 @@ pub struct Item {
     pub stack: i64,
     /// Where it came from.
     pub app: String,
-    /// Start of a copied text, secrets dotted out.
-    pub preview: String,
     /// Seconds, for clips.
     pub secs: i64,
 }
@@ -63,7 +64,7 @@ pub struct Settings {
     pub screen: (u32, u32),
     pub window: (u32, u32),
     pub clip: (u32, u32),
-    /// Keep what other apps copy.
+    /// Keep images copied in other apps.
     pub history: bool,
     pub keep_days: i64,
     pub delay: i64,
@@ -77,9 +78,6 @@ pub struct Store {
     pub settings: Settings,
     pub filter: Filter,
 }
-
-const TEXTS: usize = 300;
-pub const TEXT_MAX: usize = 200_000;
 
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
@@ -180,7 +178,9 @@ impl Store {
 
     /// Re-read the index, dropping what expired or was deleted on disk.
     pub fn reload(&mut self) -> rusqlite::Result<()> {
-        let mut q = self.db.prepare("SELECT id,path,kind,created,pinned,ord,stack,app,preview,secs FROM items ORDER BY pinned DESC, ord DESC")?;
+        let mut q = self
+            .db
+            .prepare("SELECT id,path,kind,created,pinned,ord,stack,app,secs FROM items WHERE kind != 3 ORDER BY pinned DESC, ord DESC")?;
         let all: Vec<Item> = q
             .query_map([], |r| {
                 Ok(Item {
@@ -192,8 +192,7 @@ impl Store {
                     ord: r.get(5)?,
                     stack: r.get(6)?,
                     app: r.get(7)?,
-                    preview: r.get(8)?,
-                    secs: r.get(9)?,
+                    secs: r.get(8)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -202,13 +201,10 @@ impl Store {
         let now = now_ms();
         let oldest = now - self.settings.keep_days * 86_400_000;
         let mut keep = Vec::new();
-        let mut texts = 0;
         for i in all {
-            let text = i.kind == Kind::Text;
-            texts += (text && !i.pinned) as usize;
-            let expired = !i.pinned && (i.created < oldest || text && texts > TEXTS);
+            let expired = !i.pinned && i.created < oldest;
             // A shot's file is written in the background, so give it a moment.
-            let missing = !text && now - i.created > 10_000 && !i.path.exists();
+            let missing = now - i.created > 10_000 && !i.path.exists();
             if expired || missing {
                 let _ = self.db.execute("DELETE FROM items WHERE id=?", [i.id]);
             } else {
@@ -238,20 +234,19 @@ impl Store {
         out.into_iter().map(|g| g.1).collect()
     }
 
-    /// The notch's first row: pictures, never copied text.
+    /// The notch's first row.
     pub fn recent(&self) -> Vec<Vec<i64>> {
-        self.groups(|i| i.kind != Kind::Text)
+        self.groups(|_| true)
     }
 
     pub fn shelf(&self) -> Vec<Vec<i64>> {
         match &self.filter {
             Filter::All => self.groups(|_| true),
             Filter::Clips => self.groups(|i| matches!(i.kind, Kind::Clip | Kind::Gif)),
-            Filter::Text => self.groups(|i| i.kind == Kind::Text),
-            Filter::App(a) => self.groups(|i| i.kind != Kind::Text && i.app == *a),
+            Filter::App(a) => self.groups(|i| i.app == *a),
             Filter::Apps => {
                 let mut out: Vec<(&str, Vec<i64>)> = Vec::new();
-                let mut by_time: Vec<&Item> = self.items.iter().filter(|i| i.kind != Kind::Text && !i.app.is_empty()).collect();
+                let mut by_time: Vec<&Item> = self.items.iter().filter(|i| !i.app.is_empty()).collect();
                 by_time.sort_by_key(|i| -i.created);
                 for i in by_time {
                     match out.iter_mut().find(|g| g.0 == i.app) {
@@ -301,33 +296,6 @@ impl Store {
         let t = now_ms();
         let top = self.items.iter().filter(|i| !i.pinned).map(|i| i.ord).fold(0.0, f64::max);
         (t, (t as f64).max(top + 1.0))
-    }
-
-    /// Copied text. The same text again just moves to the front.
-    pub fn add_text(&mut self, body: &str, app: &str) -> rusqlite::Result<i64> {
-        let (t, ord) = self.top();
-        let old: Option<i64> =
-            self.db.query_row("SELECT id FROM items WHERE kind=3 AND body=?", [body], |r| r.get(0)).optional()?;
-        let id = match old {
-            Some(id) => {
-                self.db.execute("UPDATE items SET created=?, ord=CASE pinned WHEN 1 THEN ord ELSE ? END WHERE id=?", params![t, ord, id])?;
-                id
-            }
-            None => {
-                let head: String = body.trim().chars().take(240).collect();
-                self.db.execute(
-                    "INSERT INTO items(path,kind,created,ord,app,preview,body) VALUES('',3,?,?,?,?,?)",
-                    params![t, ord, app, crate::secrets::mask(&head), body],
-                )?;
-                self.db.last_insert_rowid()
-            }
-        };
-        self.reload()?;
-        Ok(id)
-    }
-
-    pub fn text(&self, id: i64) -> Option<String> {
-        self.db.query_row("SELECT body FROM items WHERE id=?", [id], |r| r.get(0)).ok()
     }
 
     /// Give a shot's file a readable name. Returns the new path.
@@ -405,9 +373,7 @@ impl Store {
         let mut paths = Vec::new();
         for id in ids {
             if let Some(i) = self.get(*id) {
-                if i.kind != Kind::Text {
-                    paths.push(i.path.clone());
-                }
+                paths.push(i.path.clone());
             }
             let _ = self.db.execute("DELETE FROM items WHERE id=?", [id]);
         }

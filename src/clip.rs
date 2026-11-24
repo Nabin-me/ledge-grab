@@ -138,11 +138,6 @@ pub fn set_text(hwnd: HWND, s: &str) -> bool {
     }
 }
 
-pub enum Taken {
-    Text(String),
-    Image(Frame),
-}
-
 unsafe fn bytes(format: u32) -> Option<Vec<u8>> {
     unsafe {
         IsClipboardFormatAvailable(format).ok()?;
@@ -162,8 +157,8 @@ unsafe fn bytes(format: u32) -> Option<Vec<u8>> {
     }
 }
 
-/// What another app just copied, unless it asked not to be remembered.
-pub fn read(hwnd: HWND) -> Option<Taken> {
+/// An image another app just copied, unless it asked not to be remembered.
+pub fn read_image(hwnd: HWND) -> Option<Frame> {
     unsafe {
         let named = |n| RegisterClipboardFormatW(n);
         let has = |f| IsClipboardFormatAvailable(f).is_ok();
@@ -178,17 +173,11 @@ pub fn read(hwnd: HWND) -> Option<Taken> {
             if bytes(keep).is_some_and(|b| b.iter().take(4).all(|b| *b == 0)) {
                 return None;
             }
-            if let Some(b) = bytes(CF_UNICODETEXT.0 as u32) {
-                let t: Vec<u16> =
-                    b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|c| *c != 0).collect();
-                let t = String::from_utf16_lossy(&t);
-                return (!t.trim().is_empty() && t.len() <= crate::store::TEXT_MAX).then_some(Taken::Text(t));
-            }
-            if has(CF_HDROP.0 as u32) {
+            if has(CF_UNICODETEXT.0 as u32) || has(CF_HDROP.0 as u32) {
                 return None;
             }
             let png = bytes(png_format()).and_then(|b| crate::store::decode_png(&b));
-            png.or_else(|| dib(&bytes(CF_DIB.0 as u32)?)).filter(|f| f.w > 3 && f.h > 3).map(Taken::Image)
+            png.or_else(|| dib(&bytes(CF_DIB.0 as u32)?)).filter(|f| f.w > 3 && f.h > 3)
         })();
         let _ = CloseClipboard();
         out
@@ -258,15 +247,6 @@ pub fn open_file(p: &Path) {
             windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
         );
     }
-}
-
-/// Copied text as a file, for dragging and opening.
-pub fn text_file(id: i64, text: &str) -> Option<PathBuf> {
-    let dir = std::env::temp_dir().join("Ledge Grab");
-    std::fs::create_dir_all(&dir).ok()?;
-    let p = dir.join(format!("Text {id}.txt"));
-    std::fs::write(&p, text).ok()?;
-    Some(p)
 }
 
 /// Blocks until the drop ends.

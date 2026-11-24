@@ -178,11 +178,8 @@ fn filters(st: &Store) -> Vec<(usize, &'static str)> {
     if st.has(|i| matches!(i.kind, Kind::Clip | Kind::Gif)) {
         v.push((1, "Clips"));
     }
-    if st.has(|i| i.kind == Kind::Text) {
-        v.push((2, "Text"));
-    }
-    if st.has(|i| !i.app.is_empty() && i.kind != Kind::Text) {
-        v.push((3, "Apps"));
+    if st.has(|i| !i.app.is_empty()) {
+        v.push((2, "Apps"));
     }
     v
 }
@@ -197,10 +194,7 @@ pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
         View::Peek => {
             let k = n.min(3) as f32;
             let tiles = k * TILE.0 + (k - 1.0).max(0.0) * GAP;
-            if n == 0 && !st.items.is_empty() {
-                // Only copied text so far: no tiles here, but the shelf has some.
-                (PAD * 2.0 + 80.0, 60.0, 22.0)
-            } else if n == 0 {
+            if n == 0 {
                 (96.0, 60.0, 22.0)
             } else {
                 (PAD * 2.0 + tiles + 46.0, 116.0, 26.0)
@@ -594,9 +588,6 @@ impl Notch {
             View::Peek => {
                 if st.items.is_empty() {
                     b(&mut v, Btn::Capture, R::new(w / 2.0 - 18.0, 12.0, 36.0, 36.0));
-                } else if st.recent().is_empty() {
-                    b(&mut v, Btn::Capture, R::new(PAD, 12.0, 36.0, 36.0));
-                    b(&mut v, Btn::Open, R::new(w - PAD - 36.0, 12.0, 36.0, 36.0));
                 } else {
                     b(&mut v, Btn::Capture, R::new(w - PAD - 36.0, PAD + 3.0, 36.0, 36.0));
                     b(&mut v, Btn::Open, R::new(w - PAD - 36.0, PAD + 45.0, 36.0, 36.0));
@@ -624,7 +615,7 @@ impl Notch {
                             x += 42.0;
                         }
                     } else if matches!(st.filter, Filter::App(_)) {
-                        b(&mut v, Btn::Filter(3), R::new(x, y, 36.0, 32.0));
+                        b(&mut v, Btn::Filter(2), R::new(x, y, 36.0, 32.0));
                     } else {
                         let f = filters(st);
                         if f.len() > 1 {
@@ -749,8 +740,7 @@ impl Notch {
         let (view, prev, s) = (self.view, self.prev, self.s);
         let mut fresh: Vec<(i64, Frame)> = Vec::new();
         for id in need {
-            let text = app.store.get(id).is_none_or(|i| i.kind == Kind::Text);
-            if !text && !self.thumbs.contains_key(&id) {
+            if !self.thumbs.contains_key(&id) {
                 if let Some(f) = app.store.thumb(id) {
                     fresh.push((id, f));
                 }
@@ -891,16 +881,15 @@ impl Notch {
                     }
                 }
                 if let (Filter::App(name), true) = (&app.store.filter, self.sel.is_empty()) {
-                    round(Btn::Filter(3), glyph::BACK, INK);
-                    if let Some(r) = at(Btn::Filter(3)) {
+                    round(Btn::Filter(2), glyph::BACK, INK);
+                    if let Some(r) = at(Btn::Filter(2)) {
                         c.text(name, R::new(r.x + 46.0, r.y, 260.0, r.h), 13.0, INK, 1.0, Align::Left);
                     }
                 } else {
                     let now_on = match app.store.filter {
                         Filter::All => 0,
                         Filter::Clips => 1,
-                        Filter::Text => 2,
-                        _ => 3,
+                        _ => 2,
                     };
                     for (k, t) in filters(&app.store) {
                         if let Some(r) = at(Btn::Filter(k)) {
@@ -946,7 +935,7 @@ impl Notch {
                     "Keep",
                     "Delay",
                     "Interval",
-                    "Clipboard history",
+                    "Copied images",
                     "Launch at login",
                 ];
                 for (n, t) in rows.iter().enumerate() {
@@ -1014,10 +1003,6 @@ impl Notch {
             None => {}
         }
         let r = R::new(d.at.0 - d.grab.0, d.at.1 - d.grab.1, TILE.0, TILE.1).scale(0.92);
-        if let Some(i) = app.store.get(d.ids[0]).filter(|i| i.kind == Kind::Text) {
-            c.fill(r, 10.0, CARD, 0.95);
-            c.para(&i.preview, r.grow(-10.0), 11.5, INK, 0.85);
-        }
         if let Some(b) = self.bitmap(d.ids[0], extra) {
             c.image_round(b, r, 10.0, 0.92);
         }
@@ -1056,9 +1041,6 @@ impl Notch {
             c.image_round(b, r, 10.0, a);
         }
         c.stroke(r.grow(-0.5), 9.5, 1.0, INK, 0.10 * a);
-        if item.kind == Kind::Text && !apps {
-            c.para(&item.preview, R::new(r.x + 11.0, r.y + 9.0, r.w - 22.0, r.h - 18.0), 11.5, INK, 0.85 * a);
-        }
         if item.kind == Kind::Pdf {
             c.fill(r, 10.0, BLACK, 0.55 * a);
             c.text_w("PDF", r, 17.0, 600, INK, a, Align::Center);
@@ -1386,7 +1368,7 @@ impl Notch {
                 self.show(&app.g, &app.store, View::Shelf);
             }
             Btn::Filter(n) => {
-                app.store.filter = [Filter::All, Filter::Clips, Filter::Text, Filter::Apps][n].clone();
+                app.store.filter = [Filter::All, Filter::Clips, Filter::Apps][n].clone();
                 self.scroll.jump(0.0);
                 self.refresh(&app.g, &app.store);
             }

@@ -190,23 +190,6 @@ pub fn snug(f: &Frame, words: &[Word], r: [f32; 4]) -> [f32; 4] {
     [a as f32, r[1], (b - a) as f32, r[3]]
 }
 
-/// The same text with secrets dotted out.
-pub fn mask(text: &str) -> String {
-    text.lines()
-        .map(|l| {
-            let mut s = String::new();
-            let mut from = 0;
-            for r in spans(l) {
-                s.push_str(&l[from..r.start]);
-                s.push_str(&"•".repeat(r.len().min(10)));
-                from = r.end;
-            }
-            s + &l[from..]
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +253,5 @@ mod tests {
         assert_eq!(r, vec![[60.0, 10.0, 102.0, 12.0]]);
         let r = find(&[w("Key", 0.0), w("sk-demo_7QX2KM9P40TVaa1", 60.0), w("2", 111.0), w("ok", 170.0)]);
         assert_eq!(r, vec![[60.0, 10.0, 101.0, 12.0]]);
-        assert_eq!(mask("to ada@sun.example ok"), "to •••••••••• ok");
     }
 }

@@ -76,14 +76,14 @@ Press `B` and Ledge Grab automatically outlines emails, card numbers, phone numb
 | **Drag a tile out** | Drops the actual file directly into Slack, Discord, browsers, or any app. |
 | **Drop a tile on another** | Stacks related shots together. |
 | **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, paste queue, stack, or convert a clip to GIF. |
-| **All · Clips · Text · Apps** | Filter your history. **Apps** automatically groups captures by source app. |
+| **All · Clips · Apps** | Filter your history. **Apps** automatically groups captures by source app. |
 | **Right-click** | Switch modes, open settings, or quit. |
 
 Shots roll off the ledge after seven days unless pinned. The PNG files stay in `Pictures\Ledge Grab`, automatically named after what they show.
 
 - **Float** pins any capture above all windows — drag to move, scroll to resize, `Ctrl` + scroll to fade opacity, right-click to close.
 - **Queue** pastes your selected picks in order, advancing automatically on every `Ctrl` + `V`.
-- **Clipboard history** keeps copied text and images strictly on your machine in a local SQLite index. Anything marked private by password managers is automatically ignored, and you can toggle it anytime in Settings.
+- **Copied images** optionally keeps images copied from other apps right on the ledge (copied text is never stored). Anything marked private by other apps is ignored, and you can toggle it anytime in Settings.
 
 ## Capture
 
@@ -167,7 +167,7 @@ To build the Windows Setup installer (`Inno Setup 6`), portable ZIP, and checksu
 
 ## Privacy & Verification
 
-- **Zero network, zero telemetry:** Ledge Grab makes no outbound network requests and includes no analytics, crash uploaders, or closed-source components. Every screenshot, OCR scan, redaction, and clipboard entry stays strictly on your machine.
+- **Zero network, zero telemetry:** Ledge Grab makes no outbound network requests and includes no analytics, crash uploaders, or closed-source components. Every screenshot, clip, OCR scan, and redaction stays strictly on your machine, and copied text is never recorded.
 - **Transparent builds:** Licensed under the [MIT License](LICENSE). Official releases are compiled directly from this public repository via GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) and ship with `SHA256SUMS.txt` checksums.
 - **Note on Windows SmartScreen:** Because builds are currently unsigned, Windows SmartScreen may show a warning on first run — click **More info → Run anyway**, or build directly from source with `cargo build --release`.
 

@@ -423,19 +423,6 @@ impl Canvas<'_> {
         self.text_w(s, r, size, 500, hex, a, al)
     }
 
-    /// Wrapped text from the top left; what doesn't fit is cut.
-    pub fn para(&self, s: &str, r: R, size: f32, hex: u32, a: f32) {
-        unsafe {
-            let t: Vec<u16> = s.encode_utf16().collect();
-            let f = self.g.format(size, false, 450);
-            let Ok(l) = self.g.dw.CreateTextLayout(&t, &f, r.w, r.h) else { return };
-            let _ = l.SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
-            let _ = l.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            let _ = l.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            self.ctx.DrawTextLayout(Vector2 { X: r.x, Y: r.y }, &l, &self.brush(hex, a), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-        }
-    }
-
     pub fn icon(&self, glyph: u16, r: R, size: f32, hex: u32, a: f32) {
         unsafe {
             let f = self.g.format(size, true, 400);

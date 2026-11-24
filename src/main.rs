@@ -138,7 +138,7 @@ pub fn note(s: &str) {
 }
 
 impl App {
-    /// Put items on the clipboard: a picture for one shot, text for texts, files otherwise.
+    /// Put items on the clipboard: a picture for one shot, files otherwise.
     pub fn copy(&mut self, ids: &[i64]) -> bool {
         self.end_queue();
         self.put(ids)
@@ -146,7 +146,7 @@ impl App {
 
     fn put(&mut self, ids: &[i64]) -> bool {
         let items: Vec<_> = ids.iter().filter_map(|i| self.store.get(*i)).collect();
-        let files: Vec<PathBuf> = items.iter().filter(|i| i.kind != Kind::Text).map(|i| i.path.clone()).collect();
+        let files: Vec<PathBuf> = items.iter().map(|i| i.path.clone()).collect();
         let ok = match items.as_slice() {
             [one] if one.kind == Kind::Shot => {
                 let path = one.path.clone();
@@ -160,10 +160,6 @@ impl App {
                 }
             }
             [] => false,
-            all if all.iter().all(|i| i.kind == Kind::Text) => {
-                let t: Vec<String> = ids.iter().filter_map(|i| self.store.text(*i)).collect();
-                clip::set_text(self.main, &t.join("\r\n"))
-            }
             _ => clip::set_files(self.main, &files),
         };
         if ok {
@@ -211,11 +207,7 @@ impl App {
 
     /// A file to hand to another app.
     pub fn file(&self, id: i64) -> Option<PathBuf> {
-        let i = self.store.get(id)?;
-        match i.kind {
-            Kind::Text => clip::text_file(id, &self.store.text(id)?),
-            _ => Some(i.path.clone()),
-        }
+        Some(self.store.get(id)?.path.clone())
     }
 
     pub fn merge(&mut self, ids: &[i64]) -> Option<i64> {
@@ -415,27 +407,18 @@ impl App {
         }
     }
 
-    /// Another app copied something.
+    /// Another app copied an image.
     fn take_clipboard(&mut self, n: &mut Notch) {
         let app = capture::app_name(unsafe { GetForegroundWindow() });
-        match clip::read(self.main) {
-            Some(clip::Taken::Text(t)) => {
-                if let Ok(id) = self.store.add_text(&t, &app) {
-                    self.clip = vec![id];
-                }
-            }
-            Some(clip::Taken::Image(f)) => {
-                use std::hash::{DefaultHasher, Hash, Hasher};
-                let mut h = DefaultHasher::new();
-                (f.w, f.h, &f.px).hash(&mut h);
-                if std::mem::replace(&mut self.seen, h.finish()) == self.seen {
-                    return;
-                }
-                if let Some(id) = self.keep(f, &app, true) {
-                    self.clip = vec![id];
-                }
-            }
-            None => return,
+        let Some(f) = clip::read_image(self.main) else { return };
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        (f.w, f.h, &f.px).hash(&mut h);
+        if std::mem::replace(&mut self.seen, h.finish()) == self.seen {
+            return;
+        }
+        if let Some(id) = self.keep(f, &app, true) {
+            self.clip = vec![id];
         }
         n.refresh(&self.g, &self.store);
     }
