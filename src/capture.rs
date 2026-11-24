@@ -1,0 +1,357 @@
+//! Screen capture: one BGRA frame per monitor, in physical pixels.
+//!
+//! Monitors on the GPU we already draw with are duplicated there, so the frozen frame
+//! never leaves it. Others (laptops often split monitors across GPUs) go through GDI.
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dwm::*;
+use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{BOOL, Interface, Result};
+
+/// Top-down BGRA pixels, tightly packed.
+#[derive(Clone)]
+pub struct Frame {
+    pub w: i32,
+    pub h: i32,
+    pub px: Vec<u8>,
+}
+
+impl Frame {
+    pub fn new(w: i32, h: i32) -> Self {
+        Frame { w, h, px: vec![0; (w.max(0) as usize) * (h.max(0) as usize) * 4] }
+    }
+
+    pub fn crop(&self, r: RECT) -> Frame {
+        let (l, t) = (r.left.clamp(0, self.w), r.top.clamp(0, self.h));
+        let (rr, b) = (r.right.clamp(l, self.w), r.bottom.clamp(t, self.h));
+        let mut out = Frame::new(rr - l, b - t);
+        let n = (out.w * 4) as usize;
+        for y in 0..out.h {
+            let s = (((t + y) * self.w + l) * 4) as usize;
+            let d = (y * out.w * 4) as usize;
+            out.px[d..d + n].copy_from_slice(&self.px[s..s + n]);
+        }
+        out
+    }
+
+    /// Paste `src` with its top-left at (x, y), clipped.
+    pub fn paste(&mut self, src: &Frame, x: i32, y: i32) {
+        let x0 = x.max(0);
+        let x1 = (x + src.w).min(self.w);
+        if x1 <= x0 {
+            return;
+        }
+        let n = ((x1 - x0) * 4) as usize;
+        for sy in 0..src.h {
+            let dy = y + sy;
+            if dy < 0 || dy >= self.h {
+                continue;
+            }
+            let s = ((sy * src.w + (x0 - x)) * 4) as usize;
+            let d = ((dy * self.w + x0) * 4) as usize;
+            self.px[d..d + n].copy_from_slice(&src.px[s..s + n]);
+        }
+    }
+
+    pub fn row(&self, y: i32) -> &[u8] {
+        let n = (self.w * 4) as usize;
+        &self.px[y as usize * n..(y as usize + 1) * n]
+    }
+
+    /// Area-averaged cover-crop to exactly w x h.
+    pub fn thumb(&self, w: i32, h: i32) -> Frame {
+        let mut out = Frame::new(w, h);
+        if self.w < 1 || self.h < 1 {
+            return out;
+        }
+        let scale = (w as f64 / self.w as f64).max(h as f64 / self.h as f64);
+        let (sw, sh) = (w as f64 / scale, h as f64 / scale);
+        let x0 = (self.w as f64 - sw) / 2.0;
+        // Tall shots keep their top: that's the part you recognise.
+        let y0 = if self.h > self.w { 0.0 } else { (self.h as f64 - sh) / 2.0 };
+        for y in 0..h {
+            let a = ((y0 + y as f64 / scale) as i32).clamp(0, self.h - 1);
+            let b = ((y0 + (y + 1) as f64 / scale).ceil() as i32).clamp(a + 1, self.h);
+            let sy = (((b - a) / 4).max(1)) as usize;
+            for x in 0..w {
+                let l = ((x0 + x as f64 / scale) as i32).clamp(0, self.w - 1);
+                let r = ((x0 + (x + 1) as f64 / scale).ceil() as i32).clamp(l + 1, self.w);
+                let sx = (((r - l) / 4).max(1)) as usize;
+                let (mut c, mut n) = ([0u32; 3], 0u32);
+                for yy in (a..b).step_by(sy) {
+                    for xx in (l..r).step_by(sx) {
+                        let i = ((yy * self.w + xx) * 4) as usize;
+                        c[0] += self.px[i] as u32;
+                        c[1] += self.px[i + 1] as u32;
+                        c[2] += self.px[i + 2] as u32;
+                        n += 1;
+                    }
+                }
+                let d = ((y * w + x) * 4) as usize;
+                for k in 0..3 {
+                    out.px[d + k] = (c[k] / n) as u8;
+                }
+                out.px[d + 3] = 255;
+            }
+        }
+        out
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Monitor {
+    pub handle: isize,
+    pub rect: RECT,
+    pub primary: bool,
+    pub dpi: u32,
+}
+
+impl Monitor {
+    pub fn w(&self) -> i32 {
+        self.rect.right - self.rect.left
+    }
+    pub fn h(&self) -> i32 {
+        self.rect.bottom - self.rect.top
+    }
+    pub fn has(&self, p: POINT) -> bool {
+        inside(&self.rect, p)
+    }
+}
+
+pub fn inside(r: &RECT, p: POINT) -> bool {
+    p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+}
+
+pub fn intersect(a: &RECT, b: &RECT) -> Option<RECT> {
+    let r = RECT {
+        left: a.left.max(b.left),
+        top: a.top.max(b.top),
+        right: a.right.min(b.right),
+        bottom: a.bottom.min(b.bottom),
+    };
+    (r.right > r.left && r.bottom > r.top).then_some(r)
+}
+
+pub fn cursor() -> POINT {
+    let mut p = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut p);
+    }
+    p
+}
+
+pub fn monitors() -> Vec<Monitor> {
+    unsafe extern "system" fn each(h: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+        unsafe {
+            let list = &mut *(out.0 as *mut Vec<Monitor>);
+            let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(h, &mut mi).as_bool() {
+                let (mut dx, mut dy) = (96, 96);
+                let _ = windows::Win32::UI::HiDpi::GetDpiForMonitor(
+                    h,
+                    windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI,
+                    &mut dx,
+                    &mut dy,
+                );
+                list.push(Monitor { handle: h.0 as isize, rect: mi.rcMonitor, primary: mi.dwFlags & 1 != 0, dpi: dx });
+            }
+        }
+        BOOL(1)
+    }
+    let mut v: Vec<Monitor> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut v as *mut _ as isize));
+    }
+    v.sort_by_key(|m| !m.primary);
+    v
+}
+
+pub fn desktop(mons: &[Monitor]) -> RECT {
+    mons.iter().fold(RECT { left: i32::MAX, top: i32::MAX, right: i32::MIN, bottom: i32::MIN }, |a, m| RECT {
+        left: a.left.min(m.rect.left),
+        top: a.top.min(m.rect.top),
+        right: a.right.max(m.rect.right),
+        bottom: a.bottom.max(m.rect.bottom),
+    })
+}
+
+/// Any rectangle of the virtual desktop.
+pub fn grab(r: RECT) -> Result<Frame> {
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    unsafe {
+        let screen = GetDC(None);
+        let mem = CreateCompatibleDC(Some(screen));
+        let bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let res = (|| {
+            let bmp = CreateDIBSection(Some(screen), &bi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+            let old = SelectObject(mem, bmp.into());
+            let ok = BitBlt(mem, 0, 0, w, h, Some(screen), r.left, r.top, SRCCOPY);
+            let _ = GdiFlush();
+            let mut f = Frame { w, h, px: Vec::new() };
+            if ok.is_ok() {
+                f.px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();
+            }
+            SelectObject(mem, old);
+            let _ = DeleteObject(bmp.into());
+            ok?;
+            f.px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+            Ok(f)
+        })();
+        let _ = DeleteDC(mem);
+        ReleaseDC(None, screen);
+        res
+    }
+}
+
+/// Stitch a desktop rectangle out of per-monitor frames.
+pub fn compose(mons: &[Monitor], frames: &[Frame], r: RECT) -> Frame {
+    let mut out = Frame::new(r.right - r.left, r.bottom - r.top);
+    out.px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+    for (m, f) in mons.iter().zip(frames) {
+        if let Some(i) = intersect(&m.rect, &r) {
+            let part = f.crop(RECT {
+                left: i.left - m.rect.left,
+                top: i.top - m.rect.top,
+                right: i.right - m.rect.left,
+                bottom: i.bottom - m.rect.top,
+            });
+            out.paste(&part, i.left - r.left, i.top - r.top);
+        }
+    }
+    out
+}
+
+/// Visible frame of a window, without its invisible resize border.
+pub fn window_rect(h: HWND) -> Option<RECT> {
+    let mut r = RECT::default();
+    unsafe {
+        DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut _, size_of::<RECT>() as u32).ok()?;
+    }
+    (r.right - r.left > 8 && r.bottom - r.top > 8).then_some(r)
+}
+
+/// Top-level windows, front to back, skipping our own process.
+pub fn windows() -> Vec<RECT> {
+    unsafe extern "system" fn each(h: HWND, out: LPARAM) -> BOOL {
+        unsafe {
+            let list = &mut *(out.0 as *mut Vec<RECT>);
+            if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
+                return BOOL(1);
+            }
+            let mut pid = 0;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid == std::process::id() {
+                return BOOL(1);
+            }
+            let mut cloaked = 0u32;
+            let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4);
+            let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+            if cloaked != 0 || ex & WS_EX_TRANSPARENT.0 != 0 {
+                return BOOL(1);
+            }
+            if let Some(r) = window_rect(h) {
+                list.push(r);
+            }
+        }
+        BOOL(1)
+    }
+    let mut v: Vec<RECT> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize));
+    }
+    v
+}
+
+/// A frame still on the GPU, plus a copy on its way to the CPU.
+pub struct GpuFrame {
+    pub tex: ID3D11Texture2D,
+    staging: ID3D11Texture2D,
+    ctx: ID3D11DeviceContext,
+    w: i32,
+    h: i32,
+}
+
+impl GpuFrame {
+    /// Freeze a monitor driven by `dev`'s own adapter. None: use `grab` instead.
+    pub fn take(dev: &ID3D11Device, m: &Monitor) -> Option<GpuFrame> {
+        unsafe {
+            let ad = dev.cast::<IDXGIDevice>().ok()?.GetAdapter().ok()?;
+            let mut i = 0;
+            let out = loop {
+                let o = ad.EnumOutputs(i).ok()?;
+                i += 1;
+                let d = o.GetDesc().ok()?;
+                if d.Monitor.0 as isize == m.handle {
+                    if d.Rotation.0 > DXGI_MODE_ROTATION_IDENTITY.0 {
+                        return None;
+                    }
+                    break o;
+                }
+            };
+            let dup = out.cast::<IDXGIOutput1>().ok()?.DuplicateOutput(dev).ok()?;
+            let t = std::time::Instant::now();
+            // The first frame can be empty; the next one is the real desktop.
+            while t.elapsed().as_millis() < 60 {
+                let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+                let mut res = None;
+                dup.AcquireNextFrame(50, &mut info, &mut res).ok()?;
+                if info.LastPresentTime == 0 {
+                    let _ = dup.ReleaseFrame();
+                    continue;
+                }
+                let src: ID3D11Texture2D = res?.cast().ok()?;
+                let mut d = D3D11_TEXTURE2D_DESC::default();
+                src.GetDesc(&mut d);
+                if (d.Width as i32, d.Height as i32) != (m.w(), m.h()) || d.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+                    return None;
+                }
+                let ctx = dev.GetImmediateContext().ok()?;
+                d.MiscFlags = 0;
+                d.CPUAccessFlags = 0;
+                d.Usage = D3D11_USAGE_DEFAULT;
+                d.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+                let mut tex = None;
+                dev.CreateTexture2D(&d, None, Some(&mut tex)).ok()?;
+                d.BindFlags = 0;
+                d.Usage = D3D11_USAGE_STAGING;
+                d.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                let mut staging = None;
+                dev.CreateTexture2D(&d, None, Some(&mut staging)).ok()?;
+                let (tex, staging) = (tex?, staging?);
+                ctx.CopyResource(&tex, &src);
+                ctx.CopyResource(&staging, &tex);
+                return Some(GpuFrame { tex, staging, ctx, w: m.w(), h: m.h() });
+            }
+            None
+        }
+    }
+
+    pub fn read(&self) -> Result<Frame> {
+        unsafe {
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            self.ctx.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut m))?;
+            let n = (self.w * 4) as usize;
+            let mut px = Vec::with_capacity(n * self.h as usize);
+            for y in 0..self.h as usize {
+                px.extend_from_slice(std::slice::from_raw_parts((m.pData as *const u8).add(y * m.RowPitch as usize), n));
+            }
+            self.ctx.Unmap(&self.staging, 0);
+            px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+            Ok(Frame { w: self.w, h: self.h, px })
+        }
+    }
+}
