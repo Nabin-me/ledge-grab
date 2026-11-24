@@ -98,3 +98,12 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+          body: |
+            ### Downloads (Windows x64)
+            - **`LedgeGrab-Setup-*-x64.exe`** — Standard Windows installer (per-user by default, clean uninstaller via Windows Settings → Apps)
+            - **`LedgeGrab-*-win-x64-portable.zip`** — Portable zero-install archive
+            - **`LedgeGrab-*-win-x64.exe`** — Single standalone executable
+            - **`SHA256SUMS.txt`** — SHA-256 verification checksums
+
+            ### Code signing policy
+            Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org). See the [Code signing policy & privacy statement](https://github.com/Nabin-me/ledge-grab#code-signing-policy).

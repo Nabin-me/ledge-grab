@@ -50,6 +50,8 @@ Grab the latest Windows x64 build from [**GitHub Releases**](https://github.com/
 
 Verify downloads anytime against `SHA256SUMS.txt` attached to every release.
 
+**Uninstall:** Open **Windows Settings → Apps → Installed apps → Ledge Grab → Uninstall** (or delete the extracted folder for the portable build). Uninstalling removes the app, shortcuts, and startup entry while keeping your saved screenshots in `Pictures\Ledge Grab`.
+
 ## Seal what's private
 
 Blur before you shoot. Drag over anything, or click a word and it is gone. **The pixels are destroyed, not covered.**
@@ -163,11 +165,16 @@ To build the Windows Setup installer (`Inno Setup 6`), portable ZIP, and checksu
 
 </details>
 
-## Privacy & Code Signing Policy
+## Code signing policy
 
-- **Zero network, zero telemetry:** Ledge Grab makes no outbound network requests and contains no analytics, crash uploaders, or proprietary/closed-source components. All screenshots, OCR, redaction, and clipboard history stay strictly on your local computer.
-- **Open source:** Licensed under the [MIT License](LICENSE). All official release builds are compiled transparently from this public repository via GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)).
-- **Code signing:** Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org) *(application in progress — releases prior to approval include `SHA256SUMS.txt` verification)*.
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- **Build & release pipeline:** All official releases are built transparently from this public repository via GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) under the [MIT License](LICENSE), with no proprietary or closed-source components.
+- **Team roles:**
+  - **Authors:** [@Nabin-me](https://github.com/Nabin-me)
+  - **Reviewers:** [@Nabin-me](https://github.com/Nabin-me)
+  - **Approvers:** [@Nabin-me](https://github.com/Nabin-me)
+- **Privacy policy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. Ledge Grab makes zero outbound network requests, includes no telemetry or analytics, and keeps all captures, OCR text, redactions, and clipboard history strictly on your local computer.
 
 <br>
 
