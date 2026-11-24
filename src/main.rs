@@ -44,6 +44,7 @@ const WM_WORK: u32 = WM_APP + 3;
 const WM_KEY: u32 = WM_APP + 4;
 pub const WM_PICK_FOLDER: u32 = WM_APP + 5;
 const WM_PASTED: u32 = WM_APP + 6;
+const WM_NOTCH_KEY: u32 = WM_APP + 7;
 
 pub const T_DWELL: usize = 1;
 pub const T_LEAVE: usize = 2;
@@ -622,8 +623,10 @@ fn post(main: isize, w: Work) {
 type Hook = AtomicPtr<std::ffi::c_void>;
 static HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
 static PASTE_HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
+static NOTCH_HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
 
 fn start_key_hook() {
+    stop_hook(&NOTCH_HOOK);
     unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         unsafe {
             if code >= 0 && (w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN) {
@@ -696,6 +699,54 @@ fn stop_hook(h: &Hook) {
     if !h.is_null() {
         unsafe {
             let _ = UnhookWindowsHookEx(HHOOK(h));
+        }
+    }
+}
+
+/// Active only while the notch is expanded; intercepts notch shortcuts only when the cursor is inside it.
+pub fn set_notch_hook(on: bool) {
+    if testing() {
+        return;
+    }
+    if !on {
+        stop_hook(&NOTCH_HOOK);
+        return;
+    }
+    if !NOTCH_HOOK.load(Relaxed).is_null() {
+        return;
+    }
+    unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+        unsafe {
+            if code >= 0 && (w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN) {
+                if let (Some(a), Some(n)) = (app(), notch()) {
+                    if n.expanded() && n.in_island() && !n.modal && n.recording.is_none() && a.overlay.is_none() {
+                        let k = &*(l.0 as *const KBDLLHOOKSTRUCT);
+                        let down = |v: VIRTUAL_KEY| GetAsyncKeyState(v.0 as i32) < 0;
+                        let mut mods = 0u32;
+                        for (v, bit) in [
+                            (VK_CONTROL, MOD_CONTROL),
+                            (VK_SHIFT, MOD_SHIFT),
+                            (VK_MENU, MOD_ALT),
+                            (VK_LWIN, MOD_WIN),
+                            (VK_RWIN, MOD_WIN),
+                        ] {
+                            if down(v) {
+                                mods |= bit.0;
+                            }
+                        }
+                        if n.wants_key(a, mods, k.vkCode) {
+                            let _ = PostMessageW(Some(a.main), WM_NOTCH_KEY, WPARAM(mods as usize), LPARAM(k.vkCode as isize));
+                            return LRESULT(1);
+                        }
+                    }
+                }
+            }
+            CallNextHookEx(None, code, w, l)
+        }
+    }
+    unsafe {
+        if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
+            NOTCH_HOOK.store(h.0, Relaxed);
         }
     }
 }
@@ -921,9 +972,11 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     a.store.save_settings();
                 }
                 a.register();
+                set_notch_hook(n.expanded());
                 n.repaint();
             }
         }
+        WM_NOTCH_KEY => n.key(a, wp.0 as u32, l.0 as u32),
         WM_PASTED => {
             // The app reads the clipboard now; swap it once that's done.
             if !a.queue.is_empty() {
@@ -1064,6 +1117,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         WM_DESTROY => {
             stop_hook(&HOOK);
             stop_hook(&PASTE_HOOK);
+            stop_hook(&NOTCH_HOOK);
             a.unregister();
             unsafe { PostQuitMessage(0) };
         }

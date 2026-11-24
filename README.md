@@ -73,11 +73,12 @@ Press `B` and Ledge Grab automatically outlines emails, card numbers, phone numb
 | **Hover the top edge** | Peek your last three shots. Click any tile to copy it immediately. |
 | **`+`** | Every capture mode at a glance. |
 | **`⌄`** | Expand the shelf to browse everything you captured this week. |
+| **`⚙`** | Open Settings directly from the ledge (hotkeys, folder, retention, copied images, launch at login, quit). |
 | **Drag a tile out** | Drops the actual file directly into Slack, Discord, browsers, or any app. |
 | **Drop a tile on another** | Stacks related shots together. |
 | **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, paste queue, stack, or convert a clip to GIF. |
 | **All · Clips · Apps** | Filter your history. **Apps** automatically groups captures by source app. |
-| **Right-click** | Switch modes, open settings, or quit. |
+| **Ledge shortcuts** | While the ledge is open: `Ctrl`+`A` select all, `Shift`+Click range select, `Ctrl`+`C` copy selected, `Del` delete selected, `P` pin/unpin, `Ctrl`+`D` deselect, `Ctrl`+`,` settings, `Esc` back/close. |
 
 Shots roll off the ledge after seven days unless pinned. The PNG files stay in `Pictures\Ledge Grab`, automatically named after what they show.
 

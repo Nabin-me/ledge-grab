@@ -37,6 +37,7 @@ mod glyph {
     pub const BACK: u16 = 0xE72B;
     pub const CHECK: u16 = 0xE73E;
     pub const PINNED: u16 = 0xE841;
+    pub const GEAR: u16 = 0xE713;
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -129,6 +130,7 @@ pub struct Notch {
     lift: HashMap<i64, Anim>,
     thumbs: HashMap<i64, ID2D1Bitmap1>,
     copied: Option<(i64, Instant)>,
+    captured: Option<(i64, Instant)>,
     failed: Option<Instant>,
     /// Hotkey row waiting for keys.
     pub recording: Option<usize>,
@@ -195,7 +197,7 @@ pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
             let k = n.min(3) as f32;
             let tiles = k * TILE.0 + (k - 1.0).max(0.0) * GAP;
             if n == 0 {
-                (96.0, 60.0, 22.0)
+                (PAD * 2.0 + 36.0 * 2.0 + 8.0, 60.0, 22.0)
             } else {
                 (PAD * 2.0 + tiles + 46.0, 116.0, 26.0)
             }
@@ -206,7 +208,7 @@ pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
             (w, PAD + rows * (TILE.1 + GAP) + BAR, 28.0)
         }
         View::Menu => (424.0, PAD * 2.0 + 7.0 * 38.0 + 4.0, 28.0),
-        View::Settings => (400.0, PAD * 2.0 + 10.0 * 40.0 + 2.0, 28.0),
+        View::Settings => (400.0, PAD * 2.0 + 10.0 * 38.0 + 40.0, 28.0),
         View::Rec => (118.0, 36.0, 16.0),
         View::Flash(_) => (TILE.0 + PAD * 2.0, 116.0, 26.0),
         View::Count(_) | View::Done => {
@@ -309,6 +311,7 @@ impl Notch {
                 lift: HashMap::new(),
                 thumbs: HashMap::new(),
                 copied: None,
+                captured: None,
                 failed: None,
                 recording: None,
                 modal: false,
@@ -432,12 +435,19 @@ impl Notch {
         }
         self.view = v;
         let grow = w * h >= self.w.to * self.h.to;
-        let (d, c) = if grow { (0.52, Curve::Emphasized) } else { (0.40, Curve::Standard) };
-        self.w.go(w, d, c);
-        self.h.go(h, d, c);
-        self.rad.go(r, d, c);
+        if matches!(v, View::Flash(_)) {
+            self.w.go(w, 0.50, Curve::Spring);
+            self.h.go(h, 0.50, Curve::Spring);
+            self.rad.go(r, 0.42, Curve::Emphasized);
+        } else {
+            let (d, c) = if grow { (0.52, Curve::Emphasized) } else { (0.40, Curve::Standard) };
+            self.w.go(w, d, c);
+            self.h.go(h, d, c);
+            self.rad.go(r, d, c);
+        }
         self.hover = None;
         self.clamp_scroll(st);
+        crate::set_notch_hook(self.expanded());
         self.place();
     }
 
@@ -449,6 +459,7 @@ impl Notch {
     }
 
     pub fn flash(&mut self, g: &Gfx, st: &Store, id: i64) {
+        self.captured = Some((id, Instant::now()));
         match self.view {
             View::Rest | View::Flash(_) | View::Count(_) | View::Done | View::Rec => {
                 self.show(g, st, View::Flash(id));
@@ -587,10 +598,13 @@ impl Notch {
         match view {
             View::Peek => {
                 if st.items.is_empty() {
-                    b(&mut v, Btn::Capture, R::new(w / 2.0 - 18.0, 12.0, 36.0, 36.0));
+                    b(&mut v, Btn::Capture, R::new(PAD, 12.0, 36.0, 36.0));
+                    b(&mut v, Btn::Settings, R::new(PAD + 44.0, 12.0, 36.0, 36.0));
                 } else {
-                    b(&mut v, Btn::Capture, R::new(w - PAD - 36.0, PAD + 3.0, 36.0, 36.0));
-                    b(&mut v, Btn::Open, R::new(w - PAD - 36.0, PAD + 45.0, 36.0, 36.0));
+                    let x = w - PAD - 36.0;
+                    b(&mut v, Btn::Capture, R::new(x, PAD, 36.0, 26.0));
+                    b(&mut v, Btn::Open, R::new(x, PAD + 29.0, 36.0, 26.0));
+                    b(&mut v, Btn::Settings, R::new(x, PAD + 58.0, 36.0, 26.0));
                 }
                 for (id, r) in self.tile_rects(st, view, now) {
                     v.push(Spot { hit: Hit::Tile(id), r });
@@ -608,6 +622,7 @@ impl Notch {
                     }
                 } else {
                     b(&mut v, Btn::Capture, R::new(w - PAD - 78.0, y, 36.0, 32.0));
+                    b(&mut v, Btn::Settings, R::new(w - PAD - 120.0, y, 36.0, 32.0));
                     let mut x = PAD;
                     if !self.sel.is_empty() {
                         for k in [Btn::Copy, Btn::Pin, Btn::Delete, Btn::More] {
@@ -647,17 +662,20 @@ impl Notch {
             }
             View::Settings => {
                 let right = w - PAD;
-                let row = |n: usize| PAD + n as f32 * 40.0 + 4.0;
+                let row = |n: usize| PAD + n as f32 * 38.0 + 4.0;
                 for n in 0..4 {
-                    b(&mut v, Btn::Key(n), R::new(right - 150.0, row(n), 150.0, 32.0));
+                    b(&mut v, Btn::Key(n), R::new(right - 150.0, row(n), 150.0, 30.0));
                 }
-                b(&mut v, Btn::Folder, R::new(right - 150.0, row(4), 150.0, 32.0));
+                b(&mut v, Btn::Folder, R::new(right - 150.0, row(4), 150.0, 30.0));
                 for n in 0..3 {
-                    b(&mut v, Btn::Step(n, -1), R::new(right - 150.0, row(5 + n), 36.0, 32.0));
-                    b(&mut v, Btn::Step(n, 1), R::new(right - 36.0, row(5 + n), 36.0, 32.0));
+                    b(&mut v, Btn::Step(n, -1), R::new(right - 150.0, row(5 + n), 36.0, 30.0));
+                    b(&mut v, Btn::Step(n, 1), R::new(right - 36.0, row(5 + n), 36.0, 30.0));
                 }
-                b(&mut v, Btn::History, R::new(right - 48.0, row(8), 48.0, 32.0));
-                b(&mut v, Btn::Login, R::new(right - 48.0, row(9), 48.0, 32.0));
+                b(&mut v, Btn::History, R::new(right - 48.0, row(8), 48.0, 30.0));
+                b(&mut v, Btn::Login, R::new(right - 48.0, row(9), 48.0, 30.0));
+                let fy = h - PAD - 32.0;
+                b(&mut v, Btn::Close, R::new(PAD, fy, 36.0, 32.0));
+                b(&mut v, Btn::Quit, R::new(right - 68.0, fy, 68.0, 32.0));
             }
             View::Rec => b(&mut v, Btn::StopRec, R::new(0.0, 0.0, w, h)),
             _ => {}
@@ -704,6 +722,7 @@ impl Notch {
                 || self.scroll.busy(now)
                 || self.prev.is_some()
                 || self.copied.is_some()
+                || self.captured.is_some()
                 || self.failed.is_some()
                 || self.working
                 || (now - self.swap).as_secs_f32() < 0.5
@@ -722,11 +741,15 @@ impl Notch {
         if self.copied.is_some_and(|c| (now - c.1).as_secs_f32() > 0.9) {
             self.copied = None;
         }
-        let (w, h, r) = (self.w.get(now), self.h.get(now), self.rad.get(now));
+        if self.captured.is_some_and(|c| (now - c.1).as_secs_f32() > 1.45) {
+            self.captured = None;
+        }
+        let (w, h, r) = (self.w.get(now).max(0.0), self.h.get(now).max(0.0), self.rad.get(now).max(0.0));
         let fail = self.failed.map(|f| (now - f).as_secs_f32() / 0.9).filter(|t| *t < 1.0);
         if fail.is_none() {
             self.failed = None;
         }
+        let cap_t = self.captured.map(|(_, at)| (now - at).as_secs_f32());
         // Load whatever this frame needs before drawing.
         let need: Vec<i64> = match self.view {
             View::Flash(id) => vec![id],
@@ -761,6 +784,12 @@ impl Notch {
             let island = R::new((WIN.0 - w) / 2.0, 0.0, w, h);
             if h > 0.5 {
                 c.island(island, r, EAR);
+                if let Some(ct) = cap_t.filter(|&ct| ct < 0.72) {
+                    let p = ct / 0.72;
+                    let pulse = (1.0 - p).powi(2);
+                    c.island_rim(island, r, EAR, 1.8, BLUE, 0.75 * pulse);
+                    c.island_rim(island, r, EAR, 0.9, INK, 0.45 * pulse);
+                }
             }
             c.clip(island, || {
                 let shifted = |v: View| {
@@ -778,6 +807,14 @@ impl Notch {
                     c.layer(10.0 * (1.0 - k), k, |c| me.content(c, app, view, now, &loaded, true));
                 }
                 c.transform(&base);
+                if let Some(ct) = cap_t.filter(|&ct| ct < 0.58) {
+                    let p = ct / 0.58;
+                    let k = Curve::Emphasized.at(p);
+                    let fade = (1.0 - p).powi(2);
+                    let bw = (20.0 + (island.w - 48.0).max(16.0) * k).min(island.w - 24.0);
+                    c.fill(R::new(island.cx() - bw / 2.0, island.y + island.h - 4.5, bw, 2.5), 1.25, BLUE, 0.85 * fade);
+                    c.fill(R::new(island.cx() - bw * 0.3, island.y + island.h - 4.5, bw * 0.6, 2.5), 1.25, INK, 0.65 * fade);
+                }
                 if me.working {
                     let t = me.born.elapsed().as_secs_f32() * 0.9 % 1.0;
                     let k = (t * std::f32::consts::PI).sin();
@@ -804,7 +841,8 @@ impl Notch {
             if let Some(r) = at(b) {
                 let r2 = if down(b) { r.scale(0.94) } else { r };
                 c.fill(r2, r2.h / 2.0, if hover(b) { PILL_HOVER } else { PILL }, 1.0);
-                c.icon(glyph, r2, 15.0, hex, 1.0);
+                let sz = (r2.h * 0.48).clamp(12.5, 15.0);
+                c.icon(glyph, r2, sz, hex, 1.0);
             }
         };
         let pill = |b: Btn, text: &str, hex: u32| {
@@ -838,7 +876,14 @@ impl Notch {
                 c.text_w(&clock(s), R::new(0.0, 0.0, w - 18.0, h), 14.0, 600, INK, 1.0, Align::Right);
             }
             View::Flash(id) => {
-                self.tile(c, app, id, R::new(PAD, PAD, TILE.0, TILE.1), now, extra, false, 1.0);
+                let dy = match self.captured {
+                    Some((cid, at)) if cid == id => {
+                        let k = Curve::Spring.at(((now - at).as_secs_f32() / 0.46).min(1.0));
+                        -8.0 * (1.0 - k)
+                    }
+                    _ => 0.0,
+                };
+                self.tile(c, app, id, R::new(PAD, PAD + dy, TILE.0, TILE.1), now, extra, false, 1.0);
             }
             View::Count(n) => {
                 c.text_w(&n.to_string(), R::new(0.0, 0.0, w, h), 22.0, 600, INK, 1.0, Align::Center);
@@ -850,6 +895,7 @@ impl Notch {
                 }
                 round(Btn::Capture, glyph::ADD, INK);
                 round(Btn::Open, glyph::DOWN, INK);
+                round(Btn::Settings, glyph::GEAR, INK);
                 self.drag_layer(c, app, v, now, extra, live);
             }
             View::Shelf => {
@@ -868,6 +914,7 @@ impl Notch {
                     let y = clip.y + 12.0 + (track - th) * (self.scroll.get(now) / m);
                     c.fill(R::new(w - 8.0, y, 3.0, th), 1.5, INK, 0.22);
                 }
+                round(Btn::Settings, glyph::GEAR, INK);
                 round(Btn::Capture, glyph::ADD, INK);
                 round(Btn::Close, glyph::UP, INK);
                 if live {
@@ -939,8 +986,8 @@ impl Notch {
                     "Launch at login",
                 ];
                 for (n, t) in rows.iter().enumerate() {
-                    let y = PAD + n as f32 * 40.0;
-                    c.text(t, R::new(PAD + 6.0, y, 200.0, 40.0), 14.0, INK, 1.0, Align::Left);
+                    let y = PAD + n as f32 * 38.0;
+                    c.text(t, R::new(PAD + 6.0, y, 200.0, 38.0), 14.0, INK, 1.0, Align::Left);
                 }
                 for (n, k) in s.keys().into_iter().enumerate() {
                     let name = if self.recording == Some(n) { "Press keys".into() } else { key_name(k) };
@@ -967,17 +1014,19 @@ impl Notch {
                     }
                     for d in [-1, 1] {
                         if let Some(r) = at(Btn::Step(n, d)) {
-                            c.fill(r, 16.0, if hover(Btn::Step(n, d)) { PILL_HOVER } else { PILL }, 1.0);
+                            c.fill(r, 15.0, if hover(Btn::Step(n, d)) { PILL_HOVER } else { PILL }, 1.0);
                             c.icon(if d < 0 { 0xE738 } else { glyph::ADD }, r, 12.0, INK, 1.0);
                         }
                     }
                 }
                 for (b, on) in [(Btn::History, s.history), (Btn::Login, app.login)] {
                     let Some(r) = at(b) else { continue };
-                    let t = R::new(r.x, r.y + 3.0, 46.0, 26.0);
+                    let t = R::new(r.x, r.y + 2.0, 46.0, 26.0);
                     c.fill(t, 13.0, if on { INK } else { PILL_HOVER }, 1.0);
                     c.circle(if on { t.x + 33.0 } else { t.x + 13.0 }, t.cy(), 9.5, if on { BLACK } else { DIM }, 1.0);
                 }
+                round(Btn::Close, glyph::BACK, INK);
+                pill(Btn::Quit, "Quit", if hover(Btn::Quit) { RED } else { DIM });
             }
         }
     }
@@ -1030,7 +1079,9 @@ impl Notch {
         let lifted = self.lift.get(&id).map(|a| a.get(now)).unwrap_or(0.0);
         let pressed = matches!(self.press, Some((Hit::Tile(p), ..)) if p == id);
         let dragged = self.drag.as_ref().is_some_and(|d| d.ids.contains(&id));
-        let r = r.scale(1.0 + 0.025 * lifted - if pressed { 0.035 } else { 0.0 });
+        let cap_age = self.captured.and_then(|(cid, at)| (cid == id).then(|| (now - at).as_secs_f32()));
+        let pop = cap_age.map_or(1.0, |ct| 0.86 + 0.14 * Curve::Spring.at((ct / 0.44).min(1.0)));
+        let r = r.scale((1.0 + 0.025 * lifted - if pressed { 0.035 } else { 0.0 }) * pop);
         let a = alpha * if dragged { 0.3 } else { 1.0 };
         if group.len() > 1 {
             c.fill(R::new(r.x + 14.0, r.y - 7.0, r.w - 28.0, 30.0), 8.0, 0x2a2c31, a);
@@ -1081,6 +1132,24 @@ impl Notch {
                 c.icon(glyph::CHECK, r, 16.0 + 6.0 * k, INK, k * a);
             }
         }
+        if let Some(ct) = cap_age {
+            // Brief camera-shutter flash over the newly captured frame.
+            if ct < 0.32 {
+                let flash = (1.0 - ct / 0.32).powi(2);
+                c.fill(r, 10.0, INK, 0.48 * flash * a);
+            }
+            // Emerald check pill springs in to confirm "captured & copied".
+            if ct > 0.10 && ct < 1.38 {
+                let enter = Curve::Spring.at(((ct - 0.10) / 0.30).min(1.0));
+                let exit = if ct > 1.12 { 1.0 - Curve::Standard.at((ct - 1.12) / 0.26) } else { 1.0 };
+                let k = (enter * exit).max(0.0);
+                let rad = 10.5 * k;
+                let (cx, cy) = (r.x + r.w - 15.0, r.y + r.h - 15.0);
+                c.circle(cx, cy, rad + 1.5, BLACK, 0.88 * exit * a);
+                c.ring(cx, cy, rad, 1.3, GREEN, 0.9 * exit * a);
+                c.icon(glyph::CHECK, R::new(cx - rad, cy - rad, rad * 2.0, rad * 2.0), 10.0 * k.min(1.0), GREEN, exit * a);
+            }
+        }
         if checks {
             let on = group.iter().all(|g| self.sel.contains(g));
             let show = on || !self.sel.is_empty() || lifted > 0.01;
@@ -1122,12 +1191,96 @@ impl Notch {
         (x, y)
     }
 
-    fn in_island(&self) -> bool {
+    pub fn in_island(&self) -> bool {
         if testing() {
             let (x, y) = self.mouse;
             return x >= 0.0 && y >= 0.0 && x < self.w.to && y < self.h.to;
         }
         crate::capture::inside(&self.island_px(), cursor())
+    }
+
+    /// True when the notch should consume this keyboard shortcut instead of passing it behind.
+    pub fn wants_key(&self, app: &App, mods: u32, vk: u32) -> bool {
+        if !self.expanded() || mods & (MOD_ALT.0 | MOD_WIN.0) != 0 {
+            return false;
+        }
+        let ctrl = mods & MOD_CONTROL.0 != 0;
+        let shift = mods & MOD_SHIFT.0 != 0;
+        let key = VIRTUAL_KEY(vk as u16);
+        match (ctrl, shift, key) {
+            (false, false, VK_ESCAPE) => true,
+            (true, false, VK_A) => matches!(self.view, View::Peek | View::Shelf) && !app.store.items.is_empty(),
+            (true, false, VK_C) => {
+                !self.sel.is_empty() || matches!(self.hover, Some(Hit::Tile(_) | Hit::Check(_)))
+            }
+            (true, false, VK_D) => !self.sel.is_empty(),
+            (true, false, VK_OEM_COMMA) => true,
+            (false, false, VK_DELETE | VK_BACK) => self.view == View::Shelf && !self.sel.is_empty(),
+            (false, false, VK_P) => self.view == View::Shelf && !self.sel.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Handle a keyboard shortcut while the notch is expanded.
+    pub fn key(&mut self, app: &mut App, mods: u32, vk: u32) {
+        if !self.wants_key(app, mods, vk) {
+            return;
+        }
+        let ctrl = mods & MOD_CONTROL.0 != 0;
+        let key = VIRTUAL_KEY(vk as u16);
+        match (ctrl, key) {
+            (true, VK_A) => {
+                if self.view == View::Peek || app.store.filter == Filter::Apps {
+                    app.store.filter = Filter::All;
+                    if self.view != View::Shelf {
+                        self.show(&app.g, &app.store, View::Shelf);
+                    }
+                }
+                self.sel = groups(&app.store, View::Shelf).into_iter().flatten().collect();
+                self.more = false;
+                self.dirty = true;
+            }
+            (true, VK_C) => {
+                if !self.sel.is_empty() {
+                    self.button(app, Btn::Copy);
+                } else if let Some(Hit::Tile(id) | Hit::Check(id)) = self.hover {
+                    let ids = group_of(&app.store, self.view, id);
+                    if app.copy(&ids) {
+                        self.mark_copied(id);
+                    }
+                }
+            }
+            (true, VK_D) => {
+                self.sel.clear();
+                self.more = false;
+                self.dirty = true;
+            }
+            (true, VK_OEM_COMMA) => {
+                let next = if self.view == View::Settings { View::Peek } else { View::Settings };
+                self.show(&app.g, &app.store, next);
+            }
+            (false, VK_DELETE | VK_BACK) => self.button(app, Btn::Delete),
+            (false, VK_P) => self.button(app, Btn::Pin),
+            (false, VK_ESCAPE) => {
+                if self.more {
+                    self.more = false;
+                } else if !self.sel.is_empty() {
+                    self.sel.clear();
+                } else if matches!(self.view, View::Settings | View::Menu) {
+                    self.show(&app.g, &app.store, View::Peek);
+                } else if self.view == View::Shelf && matches!(app.store.filter, Filter::App(_)) {
+                    app.store.filter = Filter::Apps;
+                    self.scroll.jump(0.0);
+                    self.refresh(&app.g, &app.store);
+                } else if self.view == View::Shelf {
+                    self.show(&app.g, &app.store, View::Peek);
+                } else {
+                    self.show(&app.g, &app.store, View::Rest);
+                }
+                self.dirty = true;
+            }
+            _ => {}
+        }
     }
 
     fn set_hover(&mut self, h: Option<Hit>) {
@@ -1311,7 +1464,24 @@ impl Notch {
                 }
                 let ids = group_of(&app.store, self.view, id);
                 let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
-                if matches!(h, Hit::Check(_)) || ctrl {
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                if shift && self.view == View::Shelf && !self.sel.is_empty() {
+                    let gs = groups(&app.store, View::Shelf);
+                    let anchor = *self.sel.last().unwrap();
+                    if let (Some(a), Some(b)) = (
+                        gs.iter().position(|g| g.contains(&anchor)),
+                        gs.iter().position(|g| g.contains(&id)),
+                    ) {
+                        let (lo, hi) = (a.min(b), a.max(b));
+                        for g in &gs[lo..=hi] {
+                            for &i in g {
+                                if !self.sel.contains(&i) {
+                                    self.sel.push(i);
+                                }
+                            }
+                        }
+                    }
+                } else if matches!(h, Hit::Check(_)) || ctrl {
                     if ids.iter().all(|i| self.sel.contains(i)) {
                         self.sel.retain(|i| !ids.contains(i));
                     } else {
@@ -1513,6 +1683,21 @@ pub fn message(n: &mut Notch, app: &mut App, msg: u32, w: WPARAM, l: LPARAM) -> 
         WM_LBUTTONDBLCLK => n.double(app, l),
         WM_RBUTTONUP => n.right(app),
         WM_MOUSEWHEEL => n.wheel(app, ((w.0 >> 16) & 0xffff) as i16 as f32),
+        WM_KEYDOWN => {
+            let mut mods = 0u32;
+            unsafe {
+                if GetKeyState(VK_CONTROL.0 as i32) < 0 {
+                    mods |= MOD_CONTROL.0;
+                }
+                if GetKeyState(VK_SHIFT.0 as i32) < 0 {
+                    mods |= MOD_SHIFT.0;
+                }
+                if GetKeyState(VK_MENU.0 as i32) < 0 {
+                    mods |= MOD_ALT.0;
+                }
+            }
+            n.key(app, mods, w.0 as u32);
+        }
         _ => return false,
     }
     true

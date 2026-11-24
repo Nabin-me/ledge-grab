@@ -7,6 +7,8 @@ pub enum Curve {
     Emphasized,
     /// Shrinking or moving.
     Standard,
+    /// Tactile spring catch with gentle ~7% overshoot.
+    Spring,
 }
 
 fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
@@ -23,6 +25,11 @@ fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
     f(y1, y2, t)
 }
 
+fn spring(x: f32) -> f32 {
+    let raw = |t: f32| 1.0 - (-6.2 * t).exp() * (7.4 * t).cos();
+    raw(x) / raw(1.0)
+}
+
 impl Curve {
     pub fn at(self, x: f32) -> f32 {
         match x {
@@ -31,6 +38,7 @@ impl Curve {
             x => match self {
                 Curve::Emphasized => bezier(0.32, 0.72, 0.0, 1.0, x),
                 Curve::Standard => bezier(0.4, 0.0, 0.2, 1.0, x),
+                Curve::Spring => spring(x),
             },
         }
     }
@@ -75,5 +83,18 @@ impl Anim {
 
     pub fn jump(&mut self, v: f32) {
         *self = Anim::new(v);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Curve;
+
+    #[test]
+    fn spring_catches_and_settles() {
+        assert_eq!(Curve::Spring.at(0.0), 0.0);
+        assert_eq!(Curve::Spring.at(1.0), 1.0);
+        let peak = (1..100).map(|i| Curve::Spring.at(i as f32 / 100.0)).fold(0.0f32, f32::max);
+        assert!(peak > 1.04 && peak < 1.12, "unexpected spring peak {peak}");
     }
 }

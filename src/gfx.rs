@@ -24,6 +24,7 @@ pub const INK: u32 = 0xf5f6f8;
 pub const DIM: u32 = 0x9398a1;
 pub const RED: u32 = 0xf4505e;
 pub const BLUE: u32 = 0x3b9eff;
+pub const GREEN: u32 = 0x34d399;
 
 pub fn rgba(hex: u32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -595,6 +596,38 @@ impl Canvas<'_> {
                 s.EndFigure(D2D1_FIGURE_END_CLOSED);
             }) {
                 self.ctx.FillGeometry(&g, &self.brush(BLACK, 1.0), None);
+            }
+        }
+    }
+
+    /// Subtle luminous contour along the lower rim of the notch (no line along the top monitor edge).
+    pub fn island_rim(&self, r: R, rad: f32, ear: f32, width: f32, hex: u32, alpha: f32) {
+        if alpha <= 0.004 || r.h <= 1.0 {
+            return;
+        }
+        let v = |x: f32, y: f32| Vector2 { X: x, Y: y };
+        let inset = width * 0.5;
+        let rad = (rad.min(r.h * 0.6).min(r.w / 2.0) - inset).max(0.5);
+        let ear = ear.min(r.h - rad).max(0.0);
+        let (l, rt, b) = (r.x + inset, r.x + r.w - inset, r.y + r.h - inset);
+        let arc = |x, y, rd: f32, sweep| D2D1_ARC_SEGMENT {
+            point: v(x, y),
+            size: D2D_SIZE_F { width: rd, height: rd },
+            rotationAngle: 0.0,
+            sweepDirection: sweep,
+            arcSize: D2D1_ARC_SIZE_SMALL,
+        };
+        unsafe {
+            if let Ok(g) = self.g.path(|s| {
+                s.BeginFigure(v(rt, r.y + ear), D2D1_FIGURE_BEGIN_HOLLOW);
+                s.AddLine(v(rt, (b - rad).max(r.y + ear)));
+                s.AddArc(&arc(rt - rad, b, rad, D2D1_SWEEP_DIRECTION_CLOCKWISE));
+                s.AddLine(v(l + rad, b));
+                s.AddArc(&arc(l, (b - rad).max(r.y + ear), rad, D2D1_SWEEP_DIRECTION_CLOCKWISE));
+                s.AddLine(v(l, r.y + ear));
+                s.EndFigure(D2D1_FIGURE_END_OPEN);
+            }) {
+                self.ctx.DrawGeometry(&g, &self.brush(hex, alpha), width, None);
             }
         }
     }
