@@ -105,5 +105,5 @@ jobs:
             - **`LedgeGrab-*-win-x64.exe`** — Single standalone executable
             - **`SHA256SUMS.txt`** — SHA-256 verification checksums
 
-            ### Code signing policy
-            Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org). See the [Code signing policy & privacy statement](https://github.com/Nabin-me/ledge-grab#code-signing-policy).
+            ### Verification
+            Verify downloads against `SHA256SUMS.txt`. All binaries are built directly from source via GitHub Actions. If Windows SmartScreen warns on first launch, click **More info → Run anyway** (or build from source with `cargo build --release`).

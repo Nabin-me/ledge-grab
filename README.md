@@ -165,16 +165,11 @@ To build the Windows Setup installer (`Inno Setup 6`), portable ZIP, and checksu
 
 </details>
 
-## Code signing policy
+## Privacy & Verification
 
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-- **Build & release pipeline:** All official releases are built transparently from this public repository via GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) under the [MIT License](LICENSE), with no proprietary or closed-source components.
-- **Team roles:**
-  - **Authors:** [@Nabin-me](https://github.com/Nabin-me)
-  - **Reviewers:** [@Nabin-me](https://github.com/Nabin-me)
-  - **Approvers:** [@Nabin-me](https://github.com/Nabin-me)
-- **Privacy policy:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. Ledge Grab makes zero outbound network requests, includes no telemetry or analytics, and keeps all captures, OCR text, redactions, and clipboard history strictly on your local computer.
+- **Zero network, zero telemetry:** Ledge Grab makes no outbound network requests and includes no analytics, crash uploaders, or closed-source components. Every screenshot, OCR scan, redaction, and clipboard entry stays strictly on your machine.
+- **Transparent builds:** Licensed under the [MIT License](LICENSE). Official releases are compiled directly from this public repository via GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) and ship with `SHA256SUMS.txt` checksums.
+- **Note on Windows SmartScreen:** Because builds are currently unsigned, Windows SmartScreen may show a warning on first run — click **More info → Run anyway**, or build directly from source with `cargo build --release`.
 
 <br>
 
