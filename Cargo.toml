@@ -1,7 +1,10 @@
 [package]
-name = "signet"
+name = "ledge-grab"
 version = "0.1.0"
-description = "Screenshots that live on the notch."
+description = "Screenshots that live on the ledge."
+license = "MIT"
+repository = "https://github.com/Nabin-me/ledge-grab"
+homepage = "https://github.com/Nabin-me/ledge-grab"
 build = "build.rs"
 edition = "2024"
 

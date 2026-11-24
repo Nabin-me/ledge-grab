@@ -140,6 +140,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
+name = "ledge-grab"
+version = "0.1.0"
+dependencies = [
+ "gif",
+ "pdf-writer",
+ "png",
+ "regex-lite",
+ "rusqlite",
+ "windows",
+ "windows-numerics",
+ "winresource",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -295,20 +309,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "signet"
-version = "0.1.0"
-dependencies = [
- "gif",
- "pdf-writer",
- "png",
- "regex-lite",
- "rusqlite",
- "windows",
- "windows-numerics",
- "winresource",
-]
 
 [[package]]
 name = "simd-adler32"

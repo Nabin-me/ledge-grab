@@ -262,7 +262,7 @@ pub fn open_file(p: &Path) {
 
 /// Copied text as a file, for dragging and opening.
 pub fn text_file(id: i64, text: &str) -> Option<PathBuf> {
-    let dir = std::env::temp_dir().join("Signet");
+    let dir = std::env::temp_dir().join("Ledge Grab");
     std::fs::create_dir_all(&dir).ok()?;
     let p = dir.join(format!("Text {id}.txt"));
     std::fs::write(&p, text).ok()?;

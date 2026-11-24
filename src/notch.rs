@@ -261,7 +261,7 @@ impl Notch {
     pub fn new(g: &Gfx, inst: HINSTANCE) -> Result<Notch> {
         let mon = monitors()[0];
         unsafe {
-            let class = w!("SignetNotch");
+            let class = w!("LedgeGrabNotch");
             RegisterClassW(&WNDCLASSW {
                 style: CS_DBLCLKS,
                 lpfnWndProc: Some(crate::wndproc),
@@ -286,8 +286,8 @@ impl Notch {
                     None,
                 )
             };
-            let win = make(WS_EX_TRANSPARENT | WS_EX_LAYERED, w!("Signet"))?;
-            let sensor = make(WINDOW_EX_STYLE(0), w!("Signet sensor"))?;
+            let win = make(WS_EX_TRANSPARENT | WS_EX_LAYERED, w!("Ledge Grab"))?;
+            let sensor = make(WINDOW_EX_STYLE(0), w!("Ledge Grab sensor"))?;
             if !testing() {
                 let _ = SetWindowDisplayAffinity(win, WDA_EXCLUDEFROMCAPTURE);
             }

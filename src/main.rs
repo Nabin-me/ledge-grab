@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-//! Signet: screenshots that live on the notch.
+//! Ledge Grab: screenshots that live on the ledge.
 mod anim;
 mod capture;
 mod clip;
@@ -124,12 +124,12 @@ fn notch() -> Option<&'static mut Notch> {
 
 pub fn testing() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *T.get_or_init(|| std::env::var_os("SIGNET_TEST").is_some())
+    *T.get_or_init(|| std::env::var_os("LEDGE_GRAB_TEST").is_some())
 }
 
 /// Timings, only when a test asks for them.
 pub fn note(s: &str) {
-    if let Some(p) = std::env::var_os("SIGNET_LOG") {
+    if let Some(p) = std::env::var_os("LEDGE_GRAB_LOG") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
             let _ = writeln!(f, "{s}");
@@ -722,7 +722,7 @@ fn stop_hook(h: &Hook) {
 const RUN: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 
 fn login_on() -> bool {
-    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN, w!("Signet"), RRF_RT_REG_SZ, None, None, None).is_ok() }
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN, w!("Ledge Grab"), RRF_RT_REG_SZ, None, None, None).is_ok() }
 }
 
 pub fn set_login(on: bool) {
@@ -733,13 +733,13 @@ pub fn set_login(on: bool) {
             let _ = RegSetKeyValueW(
                 HKEY_CURRENT_USER,
                 RUN,
-                w!("Signet"),
+                w!("Ledge Grab"),
                 REG_SZ.0,
                 Some(v.as_ptr() as *const _),
                 v.len() as u32 * 2,
             );
         } else {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Signet"));
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("Ledge Grab"));
         }
     }
 }
@@ -1103,7 +1103,7 @@ fn restart() -> ! {
 
 fn main() {
     unsafe {
-        let name = if testing() { w!("Local\\SignetTest") } else { w!("Local\\Signet") };
+        let name = if testing() { w!("Local\\LedgeGrabTest") } else { w!("Local\\LedgeGrab") };
         let restarted = std::env::args().any(|a| a == "--restarted");
         let mut lock = CreateMutexW(None, true, name);
         let mut tries = 0;

@@ -91,7 +91,7 @@ fn fit(r: RECT, m: RECT) -> Option<RECT> {
 /// Four red lines just outside the region.
 fn edges(inst: HINSTANCE, r: RECT, t: i32) -> Vec<isize> {
     unsafe {
-        let class = w!("SignetEdge");
+        let class = w!("LedgeGrabEdge");
         RegisterClassW(&WNDCLASSW {
             lpfnWndProc: Some(crate::plain),
             hInstance: inst,
@@ -111,7 +111,7 @@ fn edges(inst: HINSTANCE, r: RECT, t: i32) -> Vec<isize> {
             let h = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
                 class,
-                w!("Signet edge"),
+                w!("Ledge Grab edge"),
                 WS_POPUP,
                 x,
                 y,

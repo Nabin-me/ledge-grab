@@ -91,9 +91,9 @@ fn env_dir(name: &str) -> PathBuf {
 
 impl Store {
     pub fn open() -> rusqlite::Result<Store> {
-        // SIGNET_DIR keeps test runs away from the real history.
-        let test = std::env::var_os("SIGNET_DIR").map(PathBuf::from);
-        let data = test.clone().unwrap_or_else(|| env_dir("LOCALAPPDATA").join("Signet"));
+        // LEDGE_GRAB_DIR keeps test runs away from the real history.
+        let test = std::env::var_os("LEDGE_GRAB_DIR").map(PathBuf::from);
+        let data = test.clone().unwrap_or_else(|| env_dir("LOCALAPPDATA").join("Ledge Grab"));
         let _ = std::fs::create_dir_all(&data);
         let db = Connection::open(data.join("index.db"))?;
         db.execute_batch(
@@ -109,7 +109,7 @@ impl Store {
             let _ = db.execute(&format!("ALTER TABLE items ADD COLUMN {c}"), []);
         }
         let pictures = windows_pictures().unwrap_or_else(|| env_dir("USERPROFILE").join("Pictures"));
-        let folder = test.map(|t| t.join("shots")).unwrap_or_else(|| pictures.join("Signet"));
+        let folder = test.map(|t| t.join("shots")).unwrap_or_else(|| pictures.join("Ledge Grab"));
         use windows::Win32::UI::Input::KeyboardAndMouse::*;
         let mut s = Store {
             db,

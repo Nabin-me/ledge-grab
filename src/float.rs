@@ -37,7 +37,7 @@ impl Float {
     /// `zoom` is relative to native pixels.
     pub fn open(g: &Gfx, inst: HINSTANCE, f: &Frame, at: POINT, zoom: f32, dpi: u32) -> Result<Float> {
         unsafe {
-            let class = w!("SignetFloat");
+            let class = w!("LedgeGrabFloat");
             RegisterClassW(&WNDCLASSW {
                 style: CS_DBLCLKS,
                 lpfnWndProc: Some(crate::wndproc),
@@ -51,7 +51,7 @@ impl Float {
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
                 class,
-                w!("Signet float"),
+                w!("Ledge Grab float"),
                 WS_POPUP,
                 at.x,
                 at.y,

@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn merges_in_order() {
-        let dir = std::env::temp_dir().join("signet-pdf-test");
+        let dir = std::env::temp_dir().join("ledge-grab-pdf-test");
         std::fs::create_dir_all(&dir).unwrap();
         let files: Vec<_> = [(40, 20), (30, 60), (100, 10)]
             .iter()
@@ -96,7 +96,7 @@ mod tests {
         assert!(out.starts_with(b"%PDF"));
         let pos: Vec<_> = ["[0 0 30 15]", "[0 0 22.5 45]", "[0 0 75 7.5]"].iter().map(|m| s.find(m).expect(m)).collect();
         assert!(pos[0] < pos[1] && pos[1] < pos[2]);
-        if let Some(keep) = std::env::var_os("SIGNET_PDF_OUT") {
+        if let Some(keep) = std::env::var_os("LEDGE_GRAB_PDF_OUT") {
             std::fs::write(keep, &out).unwrap();
         }
         assert!(super::merge(&[dir.join("missing.png")]).is_none());

@@ -1,4 +1,4 @@
-"""Drives an isolated Signet (SIGNET_TEST) with posted messages. Never moves the real mouse."""
+"""Drives an isolated Ledge Grab (LEDGE_GRAB_TEST) with posted messages. Never moves the real mouse."""
 import ctypes as C
 import ctypes.wintypes as W
 import os
@@ -22,10 +22,10 @@ class App:
             shutil.rmtree(data, ignore_errors=True)
         os.makedirs(data, exist_ok=True)
         self.data, self.log = data, os.path.join(data, "log.txt")
-        env = dict(os.environ, SIGNET_TEST="1", SIGNET_DIR=data, SIGNET_LOG=self.log)
+        env = dict(os.environ, LEDGE_GRAB_TEST="1", LEDGE_GRAB_DIR=data, LEDGE_GRAB_LOG=self.log)
         self.p = subprocess.Popen([exe], env=env)
         for _ in range(100):
-            self.h = self.find("SignetNotch", "Signet sensor")
+            self.h = self.find("LedgeGrabNotch", "Ledge Grab sensor")
             if self.h:
                 break
             time.sleep(0.05)

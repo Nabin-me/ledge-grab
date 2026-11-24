@@ -206,7 +206,7 @@ impl Overlay {
             .collect();
         let wins = windows();
         let prev = unsafe { GetForegroundWindow() };
-        let class = w!("SignetOverlay");
+        let class = w!("LedgeGrabOverlay");
         unsafe {
             RegisterClassW(&WNDCLASSW {
                 lpfnWndProc: Some(crate::wndproc),
@@ -222,7 +222,7 @@ impl Overlay {
                 CreateWindowExW(
                     WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
                     class,
-                    w!("Signet overlay"),
+                    w!("Ledge Grab overlay"),
                     WS_POPUP,
                     m.rect.left,
                     m.rect.top,
