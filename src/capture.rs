@@ -271,16 +271,42 @@ pub fn exe_path(h: HWND) -> Option<std::path::PathBuf> {
     }
 }
 
+/// A hosted app's own window, not the ApplicationFrameHost wrapper.
+fn hosted_window(frame: HWND) -> Option<HWND> {
+    unsafe extern "system" fn each(h: HWND, out: LPARAM) -> BOOL {
+        const CORE_WINDOW: &str = "Windows.UI.Core.CoreWindow";
+        let mut name = [0u16; 64];
+        let len = unsafe { GetClassNameW(h, &mut name) }.max(0) as usize;
+        if name[..len].iter().copied().eq(CORE_WINDOW.encode_utf16()) {
+            unsafe { *(out.0 as *mut Option<HWND>) = Some(h) };
+            BOOL(0)
+        } else {
+            BOOL(1)
+        }
+    }
+    let mut found = None;
+    unsafe {
+        let _ = EnumChildWindows(Some(frame), Some(each), LPARAM(&mut found as *mut _ as isize));
+    }
+    found
+}
+
 /// "Google Chrome", from the program's own description.
 pub fn app_name(h: HWND) -> String {
     use windows::Win32::Storage::FileSystem::*;
     use windows::core::{HSTRING, w};
-    let Some(path) = exe_path(h) else { return String::new() };
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let Some(mut path) = exe_path(h) else { return String::new() };
+    let stem_of = |p: &std::path::Path| p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let mut stem = stem_of(&path);
     if stem.eq_ignore_ascii_case("ApplicationFrameHost") {
-        let mut b = [0u16; 128];
-        let n = unsafe { GetWindowTextW(h, &mut b) } as usize;
-        return String::from_utf16_lossy(&b[..n]);
+        // Window titles can include private document names and change while
+        // using one app. Never use them as a source-app or folder name.
+        let Some(hosted) = hosted_window(h).and_then(exe_path) else { return "Windows app".into() };
+        path = hosted;
+        stem = stem_of(&path);
+        if stem.eq_ignore_ascii_case("ApplicationFrameHost") {
+            return "Windows app".into();
+        }
     }
     if stem.eq_ignore_ascii_case("explorer") {
         return "Explorer".into();

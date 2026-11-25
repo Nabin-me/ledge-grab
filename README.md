@@ -77,10 +77,16 @@ Press `B` and Ledge Grab automatically outlines emails, card numbers, phone numb
 | **Drag a tile out** | Drops the actual file directly into Slack, Discord, browsers, or any app. |
 | **Drop a tile on another** | Stacks related shots together. |
 | **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, paste queue, stack, or convert a clip to GIF. |
-| **All · Clips · Apps** | Filter your history. **Apps** automatically groups captures by source app. |
+| **All · Clips · App folders** | Browse the full history, view clips, or open a folder for each source app. Use the back arrow or `Esc` to return to the app folders. |
 | **Ledge shortcuts** | While the ledge is open: `Ctrl`+`A` select all, `Shift`+Click range select, `Ctrl`+`C` copy selected, `Del` delete selected, `P` pin/unpin, `Ctrl`+`D` deselect, `Ctrl`+`,` settings, `Esc` back/close. |
 
-Shots roll off the ledge after seven days unless pinned. The PNG files stay in `Pictures\Ledge Grab`, automatically named after what they show.
+Shots roll off the ledge after seven days unless pinned. The files stay in your save folder. New captures are saved by local calendar day, then source app, for example:
+
+```text
+Pictures\Ledge Grab\2026-11-25\Notepad\2026-11-25 14.30.52.017 1.png
+```
+
+Existing files stay in their original locations and remain accessible through history. The shelf's **App folders** view collects each app's visible captures across dates.
 
 - **Float** pins any capture above all windows — drag to move, scroll to resize, `Ctrl` + scroll to fade opacity, right-click to close.
 - **Queue** pastes your selected picks in order, advancing automatically on every `Ctrl` + `V`.

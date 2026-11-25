@@ -38,6 +38,7 @@ mod glyph {
     pub const CHECK: u16 = 0xE73E;
     pub const PINNED: u16 = 0xE841;
     pub const GEAR: u16 = 0xE713;
+    pub const FOLDER: u16 = 0xE8B7;
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -75,6 +76,7 @@ pub enum Btn {
     Stop,
     StopRec,
     Filter(usize),
+    BackToApps,
     Settings,
     Quit,
     Key(usize),
@@ -87,6 +89,8 @@ pub enum Btn {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hit {
     Tile(i64),
+    /// The ID of the newest item identifies the folder, not an actionable capture.
+    AppFolder(i64),
     Check(i64),
     B(Btn),
 }
@@ -127,6 +131,8 @@ pub struct Notch {
     pub sel: Vec<i64>,
     more: bool,
     scroll: Anim,
+    apps_scroll: f32,
+    just_opened_app: bool,
     lift: HashMap<i64, Anim>,
     thumbs: HashMap<i64, ID2D1Bitmap1>,
     copied: Option<(i64, Instant)>,
@@ -180,10 +186,15 @@ fn filters(st: &Store) -> Vec<(usize, &'static str)> {
     if st.has(|i| matches!(i.kind, Kind::Clip | Kind::Gif)) {
         v.push((1, "Clips"));
     }
-    if st.has(|i| !i.app.is_empty()) {
-        v.push((2, "Apps"));
+    if !st.items.is_empty() {
+        v.push((2, "App folders"));
     }
     v
+}
+
+fn folder_name(app: &str) -> &str {
+    let app = app.trim();
+    if app.is_empty() { "Other (no source)" } else { app }
 }
 
 pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
@@ -308,6 +319,8 @@ impl Notch {
                 sel: Vec::new(),
                 more: false,
                 scroll: Anim::new(0.0),
+                apps_scroll: 0.0,
+                just_opened_app: false,
                 lift: HashMap::new(),
                 thumbs: HashMap::new(),
                 copied: None,
@@ -630,7 +643,7 @@ impl Notch {
                             x += 42.0;
                         }
                     } else if matches!(st.filter, Filter::App(_)) {
-                        b(&mut v, Btn::Filter(2), R::new(x, y, 36.0, 32.0));
+                        b(&mut v, Btn::BackToApps, R::new(x, y, 36.0, 32.0));
                     } else {
                         let f = filters(st);
                         if f.len() > 1 {
@@ -646,10 +659,12 @@ impl Notch {
                 let clip = Self::shelf_clip(h, w);
                 for (id, r) in self.tile_rects(st, view, now) {
                     if r.y + r.h > clip.y && r.y < clip.y + clip.h {
-                        if !apps {
+                        if apps {
+                            v.push(Spot { hit: Hit::AppFolder(id), r });
+                        } else {
                             v.push(Spot { hit: Hit::Check(id), r: R::new(r.x + r.w - 30.0, r.y, 30.0, 30.0) });
+                            v.push(Spot { hit: Hit::Tile(id), r });
                         }
-                        v.push(Spot { hit: Hit::Tile(id), r });
                     }
                 }
             }
@@ -753,6 +768,7 @@ impl Notch {
         // Load whatever this frame needs before drawing.
         let need: Vec<i64> = match self.view {
             View::Flash(id) => vec![id],
+            View::Shelf if app.store.filter == Filter::Apps => Vec::new(),
             v => self
                 .tile_rects(&app.store, v, now)
                 .into_iter()
@@ -901,9 +917,23 @@ impl Notch {
             View::Shelf => {
                 let clip = Self::shelf_clip(h, w);
                 c.clip(clip, || {
-                    for (id, r) in self.tile_rects(&app.store, v, now) {
-                        if r.y + r.h > clip.y - 8.0 && r.y < clip.y + clip.h {
-                            self.tile(c, app, id, r, now, extra, true, 1.0);
+                    let app_folders = app.store.filter == Filter::Apps;
+                    let rects = self.tile_rects(&app.store, v, now);
+                    if app_folders {
+                        let folders = app.store.shelf();
+                        for ((id, r), folder) in rects.into_iter().zip(folders) {
+                            if r.y + r.h > clip.y && r.y < clip.y + clip.h {
+                                self.app_folder(c, app, id, folder.len(), r, live);
+                            }
+                        }
+                    } else {
+                        if rects.is_empty() && matches!(app.store.filter, Filter::App(_)) {
+                            c.text("No captures in this folder", clip, 14.0, DIM, 1.0, Align::Center);
+                        }
+                        for (id, r) in rects {
+                            if r.y + r.h > clip.y - 8.0 && r.y < clip.y + clip.h {
+                                self.tile(c, app, id, r, now, extra, true, 1.0);
+                            }
                         }
                     }
                 });
@@ -928,9 +958,10 @@ impl Notch {
                     }
                 }
                 if let (Filter::App(name), true) = (&app.store.filter, self.sel.is_empty()) {
-                    round(Btn::Filter(2), glyph::BACK, INK);
-                    if let Some(r) = at(Btn::Filter(2)) {
-                        c.text(name, R::new(r.x + 46.0, r.y, 260.0, r.h), 13.0, INK, 1.0, Align::Left);
+                    round(Btn::BackToApps, glyph::BACK, INK);
+                    if let Some(r) = at(Btn::BackToApps) {
+                        let name = fitted(&app.g, folder_name(name), 13.0, 260.0);
+                        c.text(&name, R::new(r.x + 46.0, r.y, 260.0, r.h), 13.0, INK, 1.0, Align::Left);
                     }
                 } else {
                     let now_on = match app.store.filter {
@@ -1057,6 +1088,22 @@ impl Notch {
         }
     }
 
+    fn app_folder(&self, c: &Canvas, app: &App, id: i64, count: usize, r: R, live: bool) {
+        let Some(item) = app.store.get(id) else { return };
+        let hit = Hit::AppFolder(id);
+        let hover = live && self.hover == Some(hit);
+        let pressed = live && self.press.is_some_and(|(h, ..)| h == hit);
+        let r = if pressed { r.scale(0.97) } else { r };
+        c.fill(r, 10.0, if hover { PILL_HOVER } else { CARD }, 1.0);
+        c.stroke(r.grow(-0.5), 9.5, 1.0, if hover { BLUE } else { INK }, if hover { 0.55 } else { 0.1 });
+        c.icon(glyph::FOLDER, R::new(r.x + 8.0, r.y + 8.0, 27.0, 27.0), 23.0, BLUE, 1.0);
+        c.icon(glyph::NEXT, R::new(r.x + r.w - 28.0, r.y + 9.0, 19.0, 24.0), 12.0, DIM, 1.0);
+        let name = fitted(&app.g, folder_name(&item.app), 13.0, r.w - 22.0);
+        c.text(&name, R::new(r.x + 11.0, r.y + 36.0, r.w - 22.0, 20.0), 13.0, INK, 1.0, Align::Left);
+        let item_count = if count == 1 { "1 capture".to_string() } else { format!("{count} captures") };
+        c.text(&item_count, R::new(r.x + 11.0, r.y + 56.0, r.w - 22.0, 18.0), 11.0, DIM, 1.0, Align::Left);
+    }
+
     fn bitmap<'a>(&'a self, id: i64, extra: &'a [(i64, ID2D1Bitmap1)]) -> Option<&'a ID2D1Bitmap1> {
         self.thumbs.get(&id).or_else(|| extra.iter().find(|e| e.0 == id).map(|e| &e.1))
     }
@@ -1075,7 +1122,6 @@ impl Notch {
     ) {
         let Some(item) = app.store.get(id) else { return };
         let group = group_of(&app.store, self.view, id);
-        let apps = checks && app.store.filter == Filter::Apps;
         let lifted = self.lift.get(&id).map(|a| a.get(now)).unwrap_or(0.0);
         let pressed = matches!(self.press, Some((Hit::Tile(p), ..)) if p == id);
         let dragged = self.drag.as_ref().is_some_and(|d| d.ids.contains(&id));
@@ -1101,14 +1147,6 @@ impl Notch {
             let p = R::new(r.x + 6.0, r.y + 6.0, app.g.measure(&t, 11.5, 600) + 14.0, 19.0);
             c.fill(p, 9.5, BLACK, 0.78 * a);
             c.text_w(&t, p, 11.5, 600, INK, a, Align::Center);
-        }
-        if apps {
-            let p = R::new(r.x, r.y + r.h - 28.0, r.w, 28.0);
-            c.clip(p, || c.fill(r, 10.0, BLACK, 0.82 * a));
-            let name = fitted(&app.g, &item.app, 12.0, p.w - 42.0);
-            c.text(&name, R::new(p.x + 10.0, p.y, p.w, p.h), 12.0, INK, a, Align::Left);
-            c.text_w(&group.len().to_string(), R::new(p.x, p.y, p.w - 10.0, p.h), 12.0, 600, DIM, a, Align::Right);
-            return;
         }
         if group.iter().any(|g| app.clip.contains(g)) {
             // Outside the tile, so it shows on white shots too.
@@ -1209,13 +1247,19 @@ impl Notch {
         let key = VIRTUAL_KEY(vk as u16);
         match (ctrl, shift, key) {
             (false, false, VK_ESCAPE) => true,
-            (true, false, VK_A) => matches!(self.view, View::Peek | View::Shelf) && !app.store.items.is_empty(),
+            (true, false, VK_A) => match self.view {
+                View::Peek => !app.store.items.is_empty(),
+                View::Shelf => app.store.filter != Filter::Apps && !app.store.shelf().is_empty(),
+                _ => false,
+            },
             (true, false, VK_C) => {
                 !self.sel.is_empty() || matches!(self.hover, Some(Hit::Tile(_) | Hit::Check(_)))
             }
             (true, false, VK_D) => !self.sel.is_empty(),
             (true, false, VK_OEM_COMMA) => true,
-            (false, false, VK_DELETE | VK_BACK) => self.view == View::Shelf && !self.sel.is_empty(),
+            (false, false, VK_DELETE) => self.view == View::Shelf && !self.sel.is_empty(),
+            (false, false, VK_BACK) => self.view == View::Shelf
+                && (!self.sel.is_empty() || matches!(app.store.filter, Filter::App(_))),
             (false, false, VK_P) => self.view == View::Shelf && !self.sel.is_empty(),
             _ => false,
         }
@@ -1230,11 +1274,9 @@ impl Notch {
         let key = VIRTUAL_KEY(vk as u16);
         match (ctrl, key) {
             (true, VK_A) => {
-                if self.view == View::Peek || app.store.filter == Filter::Apps {
+                if self.view == View::Peek {
                     app.store.filter = Filter::All;
-                    if self.view != View::Shelf {
-                        self.show(&app.g, &app.store, View::Shelf);
-                    }
+                    self.show(&app.g, &app.store, View::Shelf);
                 }
                 self.sel = groups(&app.store, View::Shelf).into_iter().flatten().collect();
                 self.more = false;
@@ -1259,6 +1301,15 @@ impl Notch {
                 let next = if self.view == View::Settings { View::Peek } else { View::Settings };
                 self.show(&app.g, &app.store, next);
             }
+            (false, VK_BACK) if matches!(app.store.filter, Filter::App(_)) => {
+                if self.sel.is_empty() {
+                    self.back_to_apps(app);
+                } else {
+                    self.sel.clear();
+                    self.more = false;
+                    self.dirty = true;
+                }
+            }
             (false, VK_DELETE | VK_BACK) => self.button(app, Btn::Delete),
             (false, VK_P) => self.button(app, Btn::Pin),
             (false, VK_ESCAPE) => {
@@ -1269,9 +1320,7 @@ impl Notch {
                 } else if matches!(self.view, View::Settings | View::Menu) {
                     self.show(&app.g, &app.store, View::Peek);
                 } else if self.view == View::Shelf && matches!(app.store.filter, Filter::App(_)) {
-                    app.store.filter = Filter::Apps;
-                    self.scroll.jump(0.0);
-                    self.refresh(&app.g, &app.store);
+                    self.back_to_apps(app);
                 } else if self.view == View::Shelf {
                     self.show(&app.g, &app.store, View::Peek);
                 } else {
@@ -1402,6 +1451,7 @@ impl Notch {
     }
 
     pub fn down(&mut self, app: &App, l: LPARAM) {
+        self.just_opened_app = false;
         self.mouse = self.local(l);
         if !self.expanded() && self.view != View::Rec {
             if matches!(self.view, View::Rest | View::Flash(_)) {
@@ -1453,15 +1503,16 @@ impl Notch {
             return;
         }
         match h {
-            Hit::Tile(id) | Hit::Check(id) => {
-                if self.view == View::Shelf && app.store.filter == Filter::Apps {
-                    if let Some(a) = app.store.get(id).map(|i| i.app.clone()) {
-                        app.store.filter = Filter::App(a);
-                        self.scroll.jump(0.0);
-                        self.refresh(&app.g, &app.store);
-                    }
-                    return;
+            Hit::AppFolder(id) => {
+                if let Some(a) = app.store.get(id).map(|i| i.app.trim().to_owned()) {
+                    self.apps_scroll = self.scroll.to;
+                    app.store.filter = Filter::App(a);
+                    self.just_opened_app = true;
+                    self.scroll.jump(0.0);
+                    self.refresh(&app.g, &app.store);
                 }
+            }
+            Hit::Tile(id) | Hit::Check(id) => {
                 let ids = group_of(&app.store, self.view, id);
                 let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
                 let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
@@ -1500,9 +1551,14 @@ impl Notch {
     }
 
     pub fn double(&mut self, app: &App, l: LPARAM) {
+        // Windows sends a double-click instead of the second down. The first
+        // click opened the folder, so don't open the newly exposed shot too.
+        if std::mem::take(&mut self.just_opened_app) {
+            return;
+        }
         let (x, y) = self.local(l);
         match self.hit(app, x, y) {
-            Some(Hit::Tile(id)) if self.view != View::Shelf || app.store.filter != Filter::Apps => {
+            Some(Hit::Tile(id)) => {
                 if let Some(p) = app.file(id) {
                     crate::clip::open_file(&p);
                 }
@@ -1530,6 +1586,12 @@ impl Notch {
         }
     }
 
+    fn back_to_apps(&mut self, app: &mut App) {
+        app.store.filter = Filter::Apps;
+        self.scroll.jump(self.apps_scroll.min(self.max_scroll(&app.store)));
+        self.refresh(&app.g, &app.store);
+    }
+
     fn button(&mut self, app: &mut App, b: Btn) {
         match b {
             Btn::Capture => self.show(&app.g, &app.store, View::Menu),
@@ -1537,6 +1599,7 @@ impl Notch {
                 app.store.filter = Filter::All;
                 self.show(&app.g, &app.store, View::Shelf);
             }
+            Btn::BackToApps => self.back_to_apps(app),
             Btn::Filter(n) => {
                 app.store.filter = [Filter::All, Filter::Clips, Filter::Apps][n].clone();
                 self.scroll.jump(0.0);
