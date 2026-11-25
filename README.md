@@ -70,14 +70,14 @@ Press `B` and Ledge Grab automatically outlines emails, card numbers, phone numb
 
 | Action | What it does |
 |---|---|
-| **Hover the top edge** | Peek your last three shots. Click any tile to copy it immediately. |
+| **Hover the ledge** | Pause over the top-edge badge to peek at your last three shots, or click the badge to open immediately. Click a capture to copy it. |
 | **`+`** | Every capture mode at a glance. |
 | **`⌄`** | Expand the shelf to browse everything you captured this week. |
 | **`⚙`** | Open Settings directly from the ledge (hotkeys, folder, retention, copied images, launch at login, quit). |
 | **Drag a tile out** | Drops the actual file directly into Slack, Discord, browsers, or any app. |
 | **Drop a tile on another** | Stacks related shots together. |
 | **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, paste queue, stack, or convert a clip to GIF. |
-| **All · Clips · App folders** | Browse the full history, view clips, or open a folder for each source app. Use the back arrow or `Esc` to return to the app folders. |
+| **All · Clips · App folders** | Browse all captures, view clips, or browse by app. Hover a folder to fan its file cards; click it to open. Use Back or `Esc` to return. |
 | **Ledge shortcuts** | While the ledge is open: `Ctrl`+`A` select all, `Shift`+Click range select, `Ctrl`+`C` copy selected, `Del` delete selected, `P` pin/unpin, `Ctrl`+`D` deselect, `Ctrl`+`,` settings, `Esc` back/close. |
 
 Shots roll off the ledge after seven days unless pinned. The files stay in your save folder. New captures are saved by local calendar day, then source app, for example:
@@ -86,7 +86,7 @@ Shots roll off the ledge after seven days unless pinned. The files stay in your 
 Pictures\Ledge Grab\2026-11-25\Notepad\2026-11-25 14.30.52.017 1.png
 ```
 
-Existing files stay in their original locations and remain accessible through history. The shelf's **App folders** view collects each app's visible captures across dates.
+Existing files stay in their original locations and remain accessible through history. The shelf's **App folders** view collects each app's visible captures across dates. The shelf stays open while you use it and briefly after the pointer leaves, so a quick slip off an edge won't close it.
 
 - **Float** pins any capture above all windows — drag to move, scroll to resize, `Ctrl` + scroll to fade opacity, right-click to close.
 - **Queue** pastes your selected picks in order, advancing automatically on every `Ctrl` + `V`.

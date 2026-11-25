@@ -3,6 +3,7 @@ use crate::anim::{Anim, Curve};
 use crate::capture::{Frame, Monitor, cursor, monitors};
 use crate::gfx::*;
 use crate::overlay::Mode;
+use crate::pointer_timing::{CLOSE_MS, Dwell, OPEN_MS, PANEL_CLOSE_MS, Wake, in_hover_zone};
 use crate::store::{Filter, Kind, Store};
 use crate::{App, T_DWELL, T_FLASH, T_LEAVE, WM_DRAG_OUT, testing};
 use std::collections::HashMap;
@@ -38,7 +39,6 @@ mod glyph {
     pub const CHECK: u16 = 0xE73E;
     pub const PINNED: u16 = 0xE841;
     pub const GEAR: u16 = 0xE713;
-    pub const FOLDER: u16 = 0xE8B7;
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -134,6 +134,7 @@ pub struct Notch {
     apps_scroll: f32,
     just_opened_app: bool,
     lift: HashMap<i64, Anim>,
+    folder_peek: HashMap<i64, Anim>,
     thumbs: HashMap<i64, ID2D1Bitmap1>,
     copied: Option<(i64, Instant)>,
     captured: Option<(i64, Instant)>,
@@ -148,6 +149,8 @@ pub struct Notch {
     /// A background job is running.
     pub working: bool,
     tracking: bool,
+    open_dwell: Dwell,
+    close_grace: Dwell,
     /// Last mouse position, island-local.
     mouse: (f32, f32),
     born: Instant,
@@ -195,6 +198,50 @@ fn filters(st: &Store) -> Vec<(usize, &'static str)> {
 fn folder_name(app: &str) -> &str {
     let app = app.trim();
     if app.is_empty() { "Other (no source)" } else { app }
+}
+
+/// Deterministic muted accents so a folder stays recognizable without app icons.
+fn folder_palette(name: &str) -> (u32, u32, u32) {
+    const PALETTES: [(u32, u32, u32); 5] = [
+        (0x253950, 0x36526e, 0x6887a6),
+        (0x382f4b, 0x514362, 0x88769e),
+        (0x2b3d39, 0x3a5850, 0x6d9b88),
+        (0x413339, 0x5b4951, 0x977a89),
+        (0x43382b, 0x5e4e3a, 0xa08a6b),
+    ];
+    let app = name.trim();
+    let hash = app.bytes().fold(0usize, |v, b| v.wrapping_mul(31).wrapping_add(b.to_ascii_lowercase() as usize));
+    PALETTES[hash % PALETTES.len()]
+}
+
+fn folder_sheet_pose(tile: R, wing: f32, peek: f32) -> (R, f32) {
+    let peek = peek.clamp(0.0, 1.0);
+    let x = tile.cx() - 13.0 + wing * (4.0 + 12.0 * peek);
+    let y = tile.y + 22.0 - 12.0 * peek + 3.0 * wing.abs();
+    let angle = wing * (2.5 + 11.5 * peek);
+    (R::new(x, y, 26.0, 29.0), angle)
+}
+
+fn draw_folder_sheet(c: &Canvas, sheet: R, angle: f32, paper: u32) {
+    let mut parent = Matrix3x2::identity();
+    unsafe { c.ctx.GetTransform(&mut parent) };
+    // In local DIPs: rotate around the sheet's center, then apply the island's DPI/offset transform.
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let (cx, cy) = (sheet.cx(), sheet.cy());
+    let (tx, ty) = (cx - cos * cx + sin * cy, cy - sin * cx - cos * cy);
+    c.transform(&Matrix3x2 {
+        M11: cos * parent.M11 + sin * parent.M21,
+        M12: cos * parent.M12 + sin * parent.M22,
+        M21: -sin * parent.M11 + cos * parent.M21,
+        M22: -sin * parent.M12 + cos * parent.M22,
+        M31: tx * parent.M11 + ty * parent.M21 + parent.M31,
+        M32: tx * parent.M12 + ty * parent.M22 + parent.M32,
+    });
+    c.fill(sheet, 3.0, paper, 1.0);
+    c.stroke(sheet.grow(-0.5), 2.5, 1.0, BLACK, 0.22);
+    c.fill(R::new(sheet.x + 5.0, sheet.y + 5.0, 16.0, 7.0), 1.5, 0x344457, 0.34);
+    c.fill(R::new(sheet.x + 5.0, sheet.y + 15.0, 12.0, 1.5), 0.75, 0x344457, 0.26);
+    c.transform(&parent);
 }
 
 pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
@@ -322,6 +369,7 @@ impl Notch {
                 apps_scroll: 0.0,
                 just_opened_app: false,
                 lift: HashMap::new(),
+                folder_peek: HashMap::new(),
                 thumbs: HashMap::new(),
                 copied: None,
                 captured: None,
@@ -333,6 +381,8 @@ impl Notch {
                 dirty: true,
                 working: false,
                 tracking: false,
+                open_dwell: Dwell::default(),
+                close_grace: Dwell::default(),
                 mouse: (0.0, 0.0),
                 born: Instant::now(),
             })
@@ -405,20 +455,26 @@ impl Notch {
             let _ = self.surf.resize((WIN.0 * self.s) as i32, (WIN.1 * self.s) as i32);
         }
         if moved || shift != self.shift {
+            self.cancel_open();
+            self.cancel_close();
             self.shift = shift;
             self.place();
+            self.sync_auto_close();
         }
     }
 
     pub fn hide(&mut self, on: bool) {
         if self.hidden != on {
             self.hidden = on;
+            self.cancel_open();
+            self.cancel_close();
             unsafe {
                 for h in [self.win, self.sensor] {
                     let _ = ShowWindow(h, if on { SW_HIDE } else { SW_SHOWNOACTIVATE });
                 }
             }
             self.place();
+            self.sync_auto_close();
         }
     }
 
@@ -437,6 +493,8 @@ impl Notch {
         let same = std::mem::discriminant(&v) == std::mem::discriminant(&self.view)
             && !matches!(v, View::Flash(_) | View::Count(_));
         if !same {
+            self.cancel_open();
+            self.cancel_close();
             self.prev = Some(self.view);
             self.swap = Instant::now();
             self.more = false;
@@ -458,16 +516,18 @@ impl Notch {
             self.h.go(h, d, c);
             self.rad.go(r, d, c);
         }
-        self.hover = None;
+        self.set_hover(None);
         self.clamp_scroll(st);
         crate::set_notch_hook(self.expanded());
         self.place();
+        self.sync_auto_close();
     }
 
     pub fn refresh(&mut self, g: &Gfx, st: &Store) {
         self.sel.retain(|i| st.get(*i).is_some());
         self.thumbs.retain(|i, _| st.get(*i).is_some());
         self.lift.retain(|i, _| st.get(*i).is_some());
+        self.folder_peek.retain(|i, _| st.get(*i).is_some());
         self.show(g, st, self.view);
     }
 
@@ -741,7 +801,8 @@ impl Notch {
                 || self.failed.is_some()
                 || self.working
                 || (now - self.swap).as_secs_f32() < 0.5
-                || self.lift.values().any(|a| a.busy(now)))
+                || self.lift.values().any(|a| a.busy(now))
+                || self.folder_peek.values().any(|a| a.busy(now)))
     }
 
     pub fn draw(&mut self, app: &App) -> Result<()> {
@@ -923,7 +984,7 @@ impl Notch {
                         let folders = app.store.shelf();
                         for ((id, r), folder) in rects.into_iter().zip(folders) {
                             if r.y + r.h > clip.y && r.y < clip.y + clip.h {
-                                self.app_folder(c, app, id, folder.len(), r, live);
+                                self.app_folder(c, app, (id, folder.len()), r, now, live);
                             }
                         }
                     } else {
@@ -1088,20 +1149,54 @@ impl Notch {
         }
     }
 
-    fn app_folder(&self, c: &Canvas, app: &App, id: i64, count: usize, r: R, live: bool) {
+    fn app_folder(&self, c: &Canvas, app: &App, folder: (i64, usize), r: R, now: Instant, live: bool) {
+        let (id, count) = folder;
         let Some(item) = app.store.get(id) else { return };
         let hit = Hit::AppFolder(id);
-        let hover = live && self.hover == Some(hit);
         let pressed = live && self.press.is_some_and(|(h, ..)| h == hit);
+        let peek = if live { self.folder_peek.get(&id).map_or(0.0, |a| a.get(now)) } else { 0.0 };
         let r = if pressed { r.scale(0.97) } else { r };
-        c.fill(r, 10.0, if hover { PILL_HOVER } else { CARD }, 1.0);
-        c.stroke(r.grow(-0.5), 9.5, 1.0, if hover { BLUE } else { INK }, if hover { 0.55 } else { 0.1 });
-        c.icon(glyph::FOLDER, R::new(r.x + 8.0, r.y + 8.0, 27.0, 27.0), 23.0, BLUE, 1.0);
-        c.icon(glyph::NEXT, R::new(r.x + r.w - 28.0, r.y + 9.0, 19.0, 24.0), 12.0, DIM, 1.0);
-        let name = fitted(&app.g, folder_name(&item.app), 13.0, r.w - 22.0);
-        c.text(&name, R::new(r.x + 11.0, r.y + 36.0, r.w - 22.0, 20.0), 13.0, INK, 1.0, Align::Left);
+
+        c.fill(r, 12.0, 0x16181d, 1.0);
+        c.fill(r, 12.0, 0x252b34, 0.78 * peek);
+        c.stroke(r.grow(-0.5), 11.5, 1.0, INK, 0.09 + 0.09 * peek);
+
+        let (back, face, edge) = folder_palette(&item.app);
+        let x = r.cx() - 34.0;
+        let y = r.y;
+        // The tab belongs to the back wall, with papers drawn between it and the front flap.
+        c.fill(R::new(x + 1.0, y + 30.0, 67.0, 24.0), 6.0, BLACK, 0.36);
+        c.fill(R::new(x + 1.0, y + 22.0, 66.0, 28.0), 5.5, back, 1.0);
+        c.fill(R::new(x + 2.0, y + 17.0, 24.0, 13.0), 4.0, back, 1.0);
+        c.line((x + 6.0, y + 18.0), (x + 21.0, y + 18.0), 1.0, edge, 0.55);
+        let wings: &[f32] = match count {
+            0 => &[],
+            1 => &[0.0],
+            2 => &[-0.65, 0.65],
+            _ => &[-1.0, 1.0, 0.0],
+        };
+        for (layer, &wing) in wings.iter().enumerate() {
+            let paper = if layer + 1 == wings.len() { 0xd9e1e9 } else { 0x9cabc0 };
+            let (sheet, angle) = folder_sheet_pose(r, wing, peek);
+            draw_folder_sheet(c, sheet, angle, paper);
+        }
+
+        let flap = R::new(x, y + 31.0 + 2.0 * peek, 68.0, 20.0 - 2.0 * peek);
+        c.fill(flap, 5.5, face, 1.0);
+        c.stroke(flap.grow(-0.5), 5.0, 1.0, edge, 0.68);
+        c.line(
+            (flap.x + 6.0, flap.y + 2.0),
+            (flap.x + flap.w - 6.0, flap.y + 2.0),
+            1.0, INK, 0.16 + 0.13 * peek,
+        );
+
+        let name = fitted(&app.g, folder_name(&item.app), 13.0, r.w - 20.0);
+        c.text(&name, R::new(r.x + 10.0, y + 53.0, r.w - 20.0, 17.0), 13.0, INK, 1.0, Align::Center);
         let item_count = if count == 1 { "1 capture".to_string() } else { format!("{count} captures") };
-        c.text(&item_count, R::new(r.x + 11.0, r.y + 56.0, r.w - 22.0, 18.0), 11.0, DIM, 1.0, Align::Left);
+        c.text(&item_count, R::new(r.x + 10.0, y + 69.0, r.w - 20.0, 12.0), 10.5, DIM, 1.0, Align::Center);
+        if peek > 0.01 {
+            c.icon(glyph::NEXT, R::new(r.x + r.w - 24.0, y + 13.0, 15.0, 22.0), 11.0, INK, 0.66 * peek);
+        }
     }
 
     fn bitmap<'a>(&'a self, id: i64, extra: &'a [(i64, ID2D1Bitmap1)]) -> Option<&'a ID2D1Bitmap1> {
@@ -1349,32 +1444,106 @@ impl Notch {
                 self.lift.entry(i).or_insert(Anim::new(0.0)).go(1.0, 0.22, Curve::Emphasized);
             }
         }
+        if let Some(Hit::AppFolder(id)) = self.hover {
+            if let Some(peek) = self.folder_peek.get_mut(&id) {
+                peek.go(0.0, 0.18, Curve::Standard);
+            }
+        }
+        if let Some(Hit::AppFolder(id)) = h {
+            self.folder_peek.entry(id).or_insert(Anim::new(0.0)).go(1.0, 0.25, Curve::Emphasized);
+        }
         self.hover = h;
         self.dirty = true;
     }
 
+    fn track_leave(&mut self) {
+        if self.tracking || testing() {
+            return;
+        }
+        let mut t = TRACKMOUSEEVENT {
+            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: self.sensor,
+            dwHoverTime: 0,
+        };
+        self.tracking = unsafe { TrackMouseEvent(&mut t) }.is_ok();
+    }
+
+    fn cancel_open(&mut self) {
+        if self.open_dwell.cancel() {
+            unsafe { let _ = KillTimer(Some(self.sensor), T_DWELL); }
+        }
+    }
+
+    fn cancel_close(&mut self) {
+        if self.close_grace.cancel() {
+            unsafe { let _ = KillTimer(Some(self.sensor), T_LEAVE); }
+        }
+    }
+
+    fn can_hover_open(&self) -> bool {
+        !self.hidden && matches!(self.view, View::Rest | View::Flash(_))
+    }
+
+    fn pointer_in_open_zone(&self) -> bool {
+        let (x, y) = if testing() {
+            self.mouse
+        } else {
+            let p = cursor();
+            let r = self.island_px();
+            ((p.x - r.left) as f32 / self.s, (p.y - r.top) as f32 / self.s)
+        };
+        in_hover_zone(x, y, self.w.to)
+    }
+
+    fn pointer_button_held() -> bool {
+        !testing() && [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|k| unsafe { GetAsyncKeyState(k.0 as i32) } < 0)
+    }
+
+    fn sync_hover_open(&mut self) {
+        if !self.can_hover_open() || !self.pointer_in_open_zone() || Self::pointer_button_held() {
+            self.cancel_open();
+            return;
+        }
+        if self.open_dwell.begin(Instant::now(), OPEN_MS)
+            && unsafe { SetTimer(Some(self.sensor), T_DWELL, OPEN_MS, None) } == 0
+        {
+            self.open_dwell.cancel();
+        }
+    }
+
+    fn can_auto_close(&self) -> bool {
+        !self.hidden
+            && self.expanded()
+            && !self.in_island()
+            && self.press.is_none()
+            && self.drag.is_none()
+            && !self.modal
+            && self.recording.is_none()
+    }
+
+    /// Resume or pause the leave grace after capture, a modal, or hotkey editing.
+    pub fn sync_auto_close(&mut self) {
+        if !self.can_auto_close() {
+            self.cancel_close();
+            return;
+        }
+        let delay = if matches!(self.view, View::Menu | View::Settings) || self.more { PANEL_CLOSE_MS } else { CLOSE_MS };
+        if self.close_grace.begin(Instant::now(), delay) &&
+            unsafe { SetTimer(Some(self.sensor), T_LEAVE, delay, None) } == 0
+        {
+            self.close_grace.cancel();
+        }
+    }
+
     pub fn mouse_move(&mut self, app: &mut App, l: LPARAM) {
         self.mouse = self.local(l);
-        if !self.tracking && !testing() {
-            self.tracking = true;
-            let mut t = TRACKMOUSEEVENT {
-                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
-                hwndTrack: self.sensor,
-                dwHoverTime: 0,
-            };
-            unsafe {
-                let _ = TrackMouseEvent(&mut t);
-            }
-        }
+        self.track_leave();
+        self.sync_auto_close();
         let (x, y) = self.mouse;
         match self.view {
             View::Rest | View::Flash(_) | View::Done => {
-                if matches!(self.view, View::Rest | View::Flash(_)) {
-                    unsafe {
-                        SetTimer(Some(self.sensor), T_DWELL, 120, None);
-                    }
-                }
+                self.sync_hover_open();
                 return;
             }
             View::Count(_) => return,
@@ -1420,39 +1589,69 @@ impl Notch {
 
     pub fn mouse_leave(&mut self) {
         self.tracking = false;
-        self.set_hover(None);
-        unsafe {
-            let _ = KillTimer(Some(self.sensor), T_DWELL);
-            if self.expanded() {
-                SetTimer(Some(self.sensor), T_LEAVE, 240, None);
-            }
+        self.cancel_open();
+        if testing() {
+            // The posted message driver intentionally leaves the OS pointer alone.
+            self.mouse = (-1.0, -1.0);
+        } else if self.in_island() {
+            // A queued leave can predate re-entry or the sensor's resize.
+            self.track_leave();
+            self.sync_hover_open();
+            self.sync_auto_close();
+            return;
         }
+        self.set_hover(None);
+        self.sync_auto_close();
     }
 
-    pub fn timer(&mut self, app: &App, id: usize) {
-        unsafe {
-            let _ = KillTimer(Some(self.sensor), id);
-        }
-        match id {
-            T_DWELL if matches!(self.view, View::Rest | View::Flash(_)) && self.in_island() => {
-                self.show(&app.g, &app.store, View::Peek);
-            }
-            T_LEAVE if self.expanded() => {
-                if self.in_island() || self.drag.is_some() || self.modal || self.recording.is_some() {
-                    return;
-                }
-                self.show(&app.g, &app.store, View::Rest);
-            }
+    /// Report a real automatic close so the app can schedule thumbnail trimming.
+    pub fn timer(&mut self, app: &App, id: usize) -> bool {
+        unsafe { let _ = KillTimer(Some(self.sensor), id); }
+        let transition = match id {
+            T_DWELL => self.open_dwell.poll(Instant::now()),
+            T_LEAVE => self.close_grace.poll(Instant::now()),
             T_FLASH if matches!(self.view, View::Flash(_) | View::Done) => {
                 self.show(&app.g, &app.store, View::Rest);
+                return false;
+            }
+            _ => return false,
+        };
+        match transition {
+            Wake::Early(wait) => {
+                if unsafe { SetTimer(Some(self.sensor), id, wait, None) } == 0 {
+                    if id == T_DWELL {
+                        self.open_dwell.cancel();
+                    } else {
+                        self.close_grace.cancel();
+                    }
+                }
+            }
+            Wake::Ready if id == T_DWELL && self.can_hover_open() && self.pointer_in_open_zone() && !Self::pointer_button_held() => {
+                self.show(&app.g, &app.store, View::Peek);
+            }
+            Wake::Ready if id == T_LEAVE && self.can_auto_close() => {
+                self.show(&app.g, &app.store, View::Rest);
+                return true;
             }
             _ => {}
+        }
+        false
+    }
+
+    /// A lost Win32 capture must not leave a phantom press blocking auto-close.
+    fn capture_lost(&mut self) {
+        let press = self.press.take().is_some();
+        let drag = self.drag.take().is_some();
+        if press || drag {
+            self.dirty = true;
+            self.sync_auto_close();
         }
     }
 
     pub fn down(&mut self, app: &App, l: LPARAM) {
         self.just_opened_app = false;
         self.mouse = self.local(l);
+        self.cancel_open();
         if !self.expanded() && self.view != View::Rec {
             if matches!(self.view, View::Rest | View::Flash(_)) {
                 self.show(&app.g, &app.store, View::Peek);
@@ -1462,6 +1661,7 @@ impl Notch {
         let (x, y) = self.mouse;
         if let Some(h) = self.hit(app, x, y) {
             self.press = Some((h, x, y));
+            self.cancel_close();
             unsafe {
                 SetCapture(self.sensor);
             }
@@ -1472,13 +1672,12 @@ impl Notch {
     pub fn up(&mut self, app: &mut App, l: LPARAM) {
         self.mouse = self.local(l);
         let press = self.press.take();
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        let drop = self.drop_at(&app.store);
+        let drag = self.drag.take();
+        unsafe { let _ = ReleaseCapture(); }
         self.dirty = true;
-        if self.drag.is_some() {
-            let drop = self.drop_at(&app.store);
-            let d = self.drag.take().unwrap();
+        self.sync_auto_close();
+        if let Some(d) = drag {
             match drop {
                 Some(Drop::Onto(id)) => {
                     let mut ids = group_of(&app.store, self.view, id);
@@ -1490,11 +1689,6 @@ impl Notch {
                 None => {}
             }
             self.refresh(&app.g, &app.store);
-            if !self.in_island() {
-                unsafe {
-                    SetTimer(Some(self.sensor), T_LEAVE, 240, None);
-                }
-            }
             return;
         }
         let (x, y) = self.mouse;
@@ -1567,7 +1761,8 @@ impl Notch {
         }
     }
 
-    pub fn right(&mut self, app: &App) {
+    pub fn right(&mut self, app: &App, l: LPARAM) {
+        self.mouse = self.local(l);
         self.show(&app.g, &app.store, View::Menu);
     }
 
@@ -1744,7 +1939,8 @@ pub fn message(n: &mut Notch, app: &mut App, msg: u32, w: WPARAM, l: LPARAM) -> 
         WM_LBUTTONDOWN => n.down(app, l),
         WM_LBUTTONUP => n.up(app, l),
         WM_LBUTTONDBLCLK => n.double(app, l),
-        WM_RBUTTONUP => n.right(app),
+        WM_RBUTTONUP => n.right(app, l),
+        WM_CAPTURECHANGED => n.capture_lost(),
         WM_MOUSEWHEEL => n.wheel(app, ((w.0 >> 16) & 0xffff) as i16 as f32),
         WM_KEYDOWN => {
             let mut mods = 0u32;
@@ -1764,4 +1960,33 @@ pub fn message(n: &mut Notch, app: &mut App, msg: u32, w: WPARAM, l: LPARAM) -> 
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[test]
+    fn folder_sheet_fan_rises_and_stays_inside_the_tile() {
+        let tile = R::new(16.0, 16.0, TILE.0, TILE.1);
+        let (closed, closed_angle) = folder_sheet_pose(tile, -1.0, 0.0);
+        let (left, left_angle) = folder_sheet_pose(tile, -1.0, 1.0);
+        let (right, right_angle) = folder_sheet_pose(tile, 1.0, 1.0);
+        assert!(left.x < closed.x && left.y < closed.y && left_angle < closed_angle);
+        assert_eq!(left_angle, -right_angle);
+        assert_eq!(left.cx() + right.cx(), tile.cx() * 2.0);
+        // Even the rotated sheet's corners remain inside the non-text area.
+        for (sheet, angle) in [(left, left_angle), (right, right_angle)] {
+            let (sin, cos) = angle.to_radians().sin_cos();
+            for (x, y) in [(-13.0, -14.5), (13.0, -14.5), (13.0, 14.5), (-13.0, 14.5)] {
+                let point = (sheet.cx() + cos * x - sin * y, sheet.cy() + sin * x + cos * y);
+                assert!(R::new(tile.x, tile.y, tile.w, 53.0).has(point.0, point.1));
+            }
+        }
+    }
+
+    #[test]
+    fn app_folder_color_is_stable_for_case_and_padding() {
+        assert_eq!(folder_palette("  Premiere Pro "), folder_palette("premiere pro"));
+    }
 }

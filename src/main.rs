@@ -9,6 +9,7 @@ mod notch;
 mod ocr;
 mod overlay;
 mod pdf;
+mod pointer_timing;
 mod pretty;
 mod rec;
 mod redact;
@@ -321,6 +322,7 @@ impl App {
 
     pub fn record_key(&mut self, n: &mut Notch, row: usize) {
         n.recording = Some(row);
+        n.sync_auto_close();
         self.unregister();
         start_key_hook();
     }
@@ -989,6 +991,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 }
                 a.register();
                 set_notch_hook(n.expanded());
+                n.sync_auto_close();
                 n.repaint();
             }
         }
@@ -1014,6 +1017,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         }
         WM_PICK_FOLDER => {
             n.modal = true;
+            n.sync_auto_close();
             let f = pick_folder(a.main);
             if let (Some(a), Some(n)) = (app(), notch()) {
                 n.modal = false;
@@ -1022,9 +1026,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     a.store.save_settings();
                 }
                 n.repaint();
-                unsafe {
-                    SetTimer(Some(a.main), T_LEAVE, 1500, None);
-                }
+                n.sync_auto_close();
             }
         }
         WM_TIMER => match wp.0 {
@@ -1090,8 +1092,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 }
             }
             id => {
-                n.timer(a, id);
-                if id == T_LEAVE {
+                if n.timer(a, id) {
                     unsafe {
                         SetTimer(Some(h), T_TRIM, 4000, None);
                     }
