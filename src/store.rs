@@ -1,6 +1,7 @@
 //! Shots on disk, an index in SQLite, settings beside it.
 use crate::capture::Frame;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,7 +37,7 @@ impl Kind {
 pub enum Filter {
     All,
     Clips,
-    /// One stack per app.
+    /// One folder per app.
     Apps,
     App(String),
 }
@@ -54,6 +55,22 @@ pub struct Item {
     pub app: String,
     /// Seconds, for clips.
     pub secs: i64,
+}
+
+impl Item {
+    /// Older indexes could store a hosted window's title in the app field.
+    /// Keep those labels in the existing shelf, but don't publish them as new
+    /// folder names when generating a derivative from a pre-date-layout item.
+    pub fn export_app(&self) -> &str {
+        let Some(dir) = self.path.parent() else { return "" };
+        let day = dir.parent().and_then(Path::file_name).and_then(|n| n.to_str()).unwrap_or("");
+        let expected_app_folder = app_folder(&self.app);
+        if is_date_folder(day) && dir.file_name().and_then(|n| n.to_str()) == Some(expected_app_folder.as_str()) {
+            &self.app
+        } else {
+            ""
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -77,6 +94,23 @@ pub struct Store {
     pub items: Vec<Item>,
     pub settings: Settings,
     pub filter: Filter,
+    next_file: Cell<u64>,
+}
+
+/// Folders are independent of capture stacks and show the most recent app first.
+fn group_by_app(items: &[Item]) -> Vec<Vec<i64>> {
+    let mut by_time: Vec<&Item> = items.iter().collect();
+    by_time.sort_by_key(|i| std::cmp::Reverse((i.created, i.id)));
+    let mut indices = std::collections::HashMap::<&str, usize>::new();
+    let mut folders: Vec<Vec<i64>> = Vec::new();
+    for i in by_time {
+        let idx = *indices.entry(i.app.trim()).or_insert_with(|| {
+            folders.push(Vec::new());
+            folders.len() - 1
+        });
+        folders[idx].push(i.id);
+    }
+    folders
 }
 
 pub fn now_ms() -> i64 {
@@ -87,12 +121,69 @@ fn env_dir(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_default())
 }
 
+/// Use Windows-compatible, readable components without allowing application names
+/// to change the parent directory. Names shortened or escaped get a stable suffix
+/// so two different application names don't collapse into the same folder.
+fn app_folder(app: &str) -> String {
+    let app = app.trim();
+    if app.is_empty() {
+        return "Other".into();
+    }
+
+    let mut safe = String::new();
+    let mut units = 0;
+    for ch in app.chars() {
+        let ch = if ch.is_control() || "\\/:*?\"<>|~".contains(ch) { '_' } else { ch };
+        units += ch.len_utf16();
+        if units > 56 {
+            break;
+        }
+        safe.push(ch);
+    }
+    let safe = safe.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let base = safe.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") ||
+        ["COM", "LPT"].into_iter().any(|prefix| {
+            base.strip_prefix(prefix).is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"))
+        });
+    if safe == app && !reserved {
+        return safe.into();
+    }
+    let hash = app.to_lowercase().bytes().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+    });
+    // Prefix reserved device names, even if they appear before a dot.
+    let prefix = if reserved { "_" } else { "" };
+    let label = if safe.is_empty() { "App" } else { safe };
+    format!("{prefix}{label}~{hash:016x}")
+}
+
+fn is_date_folder(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() == 10 && b.iter().enumerate().all(|(i, c)| match i {
+        4 | 7 => *c == b'-',
+        _ => c.is_ascii_digit(),
+    })
+}
+
+fn dated_location(root: &Path, app: &str, [year, month, day]: [u16; 3], [hour, min, sec, ms]: [u16; 4]) -> (PathBuf, String) {
+    let date = format!("{year:04}-{month:02}-{day:02}");
+    let dir = root.join(&date).join(app_folder(app));
+    (dir, format!("{date} {hour:02}.{min:02}.{sec:02}.{ms:03}"))
+}
+
 impl Store {
     pub fn open() -> rusqlite::Result<Store> {
         // LEDGE_GRAB_DIR keeps test runs away from the real history.
         let test = std::env::var_os("LEDGE_GRAB_DIR").map(PathBuf::from);
         let data = test.clone().unwrap_or_else(|| env_dir("LOCALAPPDATA").join("Ledge Grab"));
-        let _ = std::fs::create_dir_all(&data);
+        let pictures = windows_pictures().unwrap_or_else(|| env_dir("USERPROFILE").join("Pictures"));
+        let folder = test.map(|t| t.join("shots")).unwrap_or_else(|| pictures.join("Ledge Grab"));
+        Self::open_at(&data, folder)
+    }
+
+    fn open_at(data: &Path, folder: PathBuf) -> rusqlite::Result<Store> {
+        let _ = std::fs::create_dir_all(data);
         let db = Connection::open(data.join("index.db"))?;
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-256;
@@ -106,8 +197,6 @@ impl Store {
         for c in ["app TEXT NOT NULL DEFAULT ''", "preview TEXT NOT NULL DEFAULT ''", "body TEXT", "secs INTEGER NOT NULL DEFAULT 0"] {
             let _ = db.execute(&format!("ALTER TABLE items ADD COLUMN {c}"), []);
         }
-        let pictures = windows_pictures().unwrap_or_else(|| env_dir("USERPROFILE").join("Pictures"));
-        let folder = test.map(|t| t.join("shots")).unwrap_or_else(|| pictures.join("Ledge Grab"));
         use windows::Win32::UI::Input::KeyboardAndMouse::*;
         let mut s = Store {
             db,
@@ -125,6 +214,7 @@ impl Store {
                 last: None,
             },
             filter: Filter::All,
+            next_file: Cell::new(0),
         };
         s.load_settings();
         s.reload()?;
@@ -243,19 +333,8 @@ impl Store {
         match &self.filter {
             Filter::All => self.groups(|_| true),
             Filter::Clips => self.groups(|i| matches!(i.kind, Kind::Clip | Kind::Gif)),
-            Filter::App(a) => self.groups(|i| i.app == *a),
-            Filter::Apps => {
-                let mut out: Vec<(&str, Vec<i64>)> = Vec::new();
-                let mut by_time: Vec<&Item> = self.items.iter().filter(|i| !i.app.is_empty()).collect();
-                by_time.sort_by_key(|i| -i.created);
-                for i in by_time {
-                    match out.iter_mut().find(|g| g.0 == i.app) {
-                        Some(g) => g.1.push(i.id),
-                        None => out.push((&i.app, vec![i.id])),
-                    }
-                }
-                out.into_iter().map(|g| g.1).collect()
-            }
+            Filter::App(a) => self.groups(|i| i.app.trim() == a.as_str()),
+            Filter::Apps => group_by_app(&self.items),
         }
     }
 
@@ -263,22 +342,27 @@ impl Store {
         self.items.iter().any(f)
     }
 
-    /// A new file name inside this month's folder.
-    pub fn new_path(&self, ext: &str) -> PathBuf {
+    /// A new file path under the capture's local day and source app.
+    /// Existing items hold their exact paths in SQLite; no migration is needed.
+    pub fn new_path(&self, ext: &str, app: &str) -> std::io::Result<PathBuf> {
         let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-        let dir = self.settings.folder.join(format!("{:04}-{:02}", t.wYear, t.wMonth));
-        let _ = std::fs::create_dir_all(&dir);
-        let stem = format!(
-            "{:04}-{:02}-{:02} {:02}.{:02}.{:02}",
-            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+        let (dir, stem) = dated_location(
+            &self.settings.folder,
+            app,
+            [t.wYear, t.wMonth, t.wDay],
+            [t.wHour, t.wMinute, t.wSecond, t.wMilliseconds],
         );
-        let mut p = dir.join(format!("{stem}.{ext}"));
-        let mut n = 2;
-        while p.exists() || self.items.iter().any(|i| i.path == p) {
-            p = dir.join(format!("{stem} {n}.{ext}"));
-            n += 1;
+        std::fs::create_dir_all(&dir)?;
+        // A GIF batch can queue multiple writes before any of them reaches SQLite
+        // or disk. Allocate a distinct stem to each worker, including its .part file.
+        loop {
+            let n = self.next_file.get() + 1;
+            self.next_file.set(n);
+            let p = dir.join(format!("{stem} {n}.{ext}"));
+            if !p.exists() && !p.with_extension("part").exists() && !self.items.iter().any(|i| i.path == p) {
+                return Ok(p);
+            }
         }
-        p
     }
 
     pub fn add(&mut self, path: &Path, kind: Kind, thumb: &Frame, app: &str, secs: i64) -> rusqlite::Result<i64> {
@@ -419,6 +503,86 @@ pub fn title(words: &[crate::ocr::Word]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::ocr::Word;
+
+    #[test]
+    fn app_folders_include_unknown_and_follow_capture_recency() {
+        let item = |id, app: &str, created, stack| Item {
+            id, app: app.into(), created, stack, path: PathBuf::new(), kind: Kind::Shot,
+            pinned: false, ord: 0.0, secs: 0,
+        };
+        let captures = [
+            item(1, "Premiere Pro", 100, 7),
+            item(2, "   ", 120, 0),
+            item(3, "Firefox", 130, 7),
+            item(4, " Premiere Pro ", 160, 0),
+            item(5, "", 120, 0),
+        ];
+        assert_eq!(group_by_app(&captures), vec![vec![4, 1], vec![3], vec![5, 2]]);
+        assert!(group_by_app(&[]).is_empty());
+    }
+
+    #[test]
+    fn dated_paths_use_local_day_and_source_app() {
+        let root = Path::new("Captures");
+        let first = dated_location(root, "Adobe Premiere Pro", [2026, 11, 25], [23, 59, 59, 998]);
+        let next = dated_location(root, "Adobe Premiere Pro", [2026, 11, 26], [0, 0, 0, 0]);
+        assert_eq!(first.0, root.join("2026-11-25").join("Adobe Premiere Pro"));
+        assert_eq!(first.1, "2026-11-25 23.59.59.998");
+        assert_eq!(next.0, root.join("2026-11-26").join("Adobe Premiere Pro"));
+        assert_eq!(dated_location(root, "", [2026, 11, 26], [0; 4]).0, root.join("2026-11-26").join("Other"));
+    }
+
+    #[test]
+    fn app_folders_cannot_traverse_or_alias_windows_devices() {
+        for name in [".", "..", "C:\\Temp", "app/another", "COM¹.txt", "con.txt", "NUL", "LPT9", "COM1 .ext", "CONIN$", "AUX", ".app.", "My\0App"] {
+            let component = app_folder(name);
+            assert_eq!(Path::new(&component).components().count(), 1, "{name}");
+            assert!(component.contains('~'), "{name}: {component}");
+            assert!(!component.ends_with(['.', ' ']), "{component}");
+        }
+        assert_ne!(app_folder("A/B"), app_folder("A:B"));
+        assert_ne!(app_folder("A/B"), app_folder("A_B"));
+        assert_eq!(app_folder("Café 3D"), "Café 3D");
+        let long = "😊".repeat(100);
+        assert!(app_folder(&long).encode_utf16().count() <= 73);
+    }
+
+    #[test]
+    fn saving_new_captures_keeps_legacy_paths_in_the_index() {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let temp = Cleanup(std::env::temp_dir().join(format!("ledge-path-test-{}-{nonce}", std::process::id())));
+        let base = temp.0.join("shots");
+        let mut store = Store::open_at(&temp.0, base.clone()).unwrap();
+        let legacy = base.join("2026-11").join("old capture.png");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let thumb = Frame::new(2, 2);
+        write_file(&legacy, &encode_png(&thumb)).unwrap();
+        let old_id = store.add(&legacy, Kind::Shot, &thumb, "Explorer", 0).unwrap();
+
+        let path = store.new_path("png", "Explorer").unwrap();
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "Explorer");
+        assert_eq!(path.strip_prefix(&base).unwrap().components().count(), 3);
+        let another = store.new_path("png", "Explorer").unwrap();
+        assert_ne!(path, another);
+        write_file(&path, &encode_png(&thumb)).unwrap();
+        let new_id = store.add(&path, Kind::Shot, &thumb, "Explorer", 0).unwrap();
+        drop(store);
+
+        let reopened = Store::open_at(&temp.0, base).unwrap();
+        let old_item = reopened.get(old_id).unwrap();
+        let new_item = reopened.get(new_id).unwrap();
+        assert_eq!(old_item.path, legacy);
+        assert_eq!(new_item.path, path);
+        assert_eq!(old_item.export_app(), "");
+        assert_eq!(new_item.export_app(), "Explorer");
+        assert!(legacy.is_file() && path.is_file());
+    }
 
     #[test]
     fn names_from_the_headline() {

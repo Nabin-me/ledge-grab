@@ -9,6 +9,7 @@ mod notch;
 mod ocr;
 mod overlay;
 mod pdf;
+mod pointer_timing;
 mod pretty;
 mod rec;
 mod redact;
@@ -59,7 +60,7 @@ const T_PASTE: usize = 10;
 pub const T_REC: usize = 11;
 
 enum Work {
-    Shot(Frame, RECT),
+    Shot(Frame, String),
     Text(String),
     /// What a shot turned out to say.
     Name(i64, String),
@@ -214,10 +215,11 @@ impl App {
     pub fn merge(&mut self, ids: &[i64]) -> Option<i64> {
         let items: Vec<_> = ids.iter().filter_map(|i| self.store.get(*i)).collect();
         let files: Vec<PathBuf> = items.iter().map(|i| i.path.clone()).collect();
-        let app = items.first()?.app.clone();
+        let first_app = items.first()?.export_app();
+        let app = if items.iter().all(|i| i.export_app() == first_app) { first_app } else { "Mixed apps" }.to_owned();
         let bytes = pdf::merge(&files)?;
         let thumb = self.store.thumb(*ids.first()?)?;
-        let path = self.store.new_path("pdf");
+        let path = self.store.new_path("pdf", &app).ok()?;
         store::write_file(&path, &bytes).ok()?;
         let id = self.store.add(&path, Kind::Pdf, &thumb, &app, 0).ok()?;
         self.copy(&[id]);
@@ -229,7 +231,7 @@ impl App {
         let mut last = None;
         for id in ids {
             let i = self.store.get(*id)?;
-            let (path, app) = (i.path.clone(), i.app.clone());
+            let (path, app) = (i.path.clone(), i.export_app().to_owned());
             let f = pretty::make(&self.g, &read_shot(&path)?).ok()?;
             last = self.deliver(f, false, || app);
         }
@@ -269,7 +271,11 @@ impl App {
     pub fn gif(&mut self, ids: &[i64]) {
         for id in ids {
             let Some(i) = self.store.get(*id).filter(|i| i.kind == Kind::Clip) else { continue };
-            let (src, dst, from, main) = (i.path.clone(), self.store.new_path("gif"), *id, self.main.0 as isize);
+            let Ok(dst) = self.store.new_path("gif", i.export_app()) else {
+                note("GIF destination unavailable");
+                continue;
+            };
+            let (src, from, main) = (i.path.clone(), *id, self.main.0 as isize);
             self.jobs += 1;
             std::thread::spawn(move || {
                 let ok = rec::gif(&src, &dst).is_some();
@@ -316,6 +322,7 @@ impl App {
 
     pub fn record_key(&mut self, n: &mut Notch, row: usize) {
         n.recording = Some(row);
+        n.sync_auto_close();
         self.unregister();
         start_key_hook();
     }
@@ -372,7 +379,10 @@ impl App {
     fn keep(&mut self, f: Frame, app: &str, named: bool) -> Option<i64> {
         let t = Instant::now();
         let thumb = f.thumb(store::THUMB.0, store::THUMB.1);
-        let path = self.store.new_path("png");
+        let Ok(path) = self.store.new_path("png", app) else {
+            post(self.main.0 as isize, Work::Failed);
+            return None;
+        };
         let id = self.store.add(&path, Kind::Shot, &thumb, app, 0).ok()?;
         let main = self.main.0 as isize;
         std::thread::spawn(move || {
@@ -437,7 +447,11 @@ impl App {
 
     fn record(&mut self, n: &mut Notch, r: RECT) {
         let main = self.main.0 as isize;
-        let path = self.store.new_path("mp4");
+        let Ok(path) = self.store.new_path("mp4", &self.rec_app) else {
+            self.rec_app.clear();
+            n.fail();
+            return;
+        };
         match rec::Rec::start(self.inst, r, path, move |c| post(main, Work::Clip(c))) {
             Some(r) => {
                 self.rec = Some(r);
@@ -447,7 +461,10 @@ impl App {
                     SetTimer(Some(self.main), T_REC, 250, None);
                 }
             }
-            None => n.fail(),
+            None => {
+                self.rec_app.clear();
+                n.fail();
+            }
         }
     }
 
@@ -528,11 +545,12 @@ impl App {
             }
             Outcome::Shot(r) => match o.mode {
                 Mode::Scroll => {
+                    let app = o.app(r);
                     o.refocus();
                     o.close();
                     let main = self.main.0 as isize;
                     std::thread::spawn(move || {
-                        post(main, scroll::run(r).map(|f| Work::Shot(f, r)).unwrap_or(Work::Failed));
+                        post(main, scroll::run(r).map(|f| Work::Shot(f, app)).unwrap_or(Work::Failed));
                     });
                 }
                 Mode::Interval => {
@@ -907,8 +925,8 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         WM_WORK => {
             let w = unsafe { *Box::from_raw(l.0 as *mut Work) };
             match w {
-                Work::Shot(f, r) => {
-                    if let Some(id) = a.deliver(f, false, || capture::app_at(&capture::windows(), r)) {
+                Work::Shot(f, app) => {
+                    if let Some(id) = a.deliver(f, false, || app) {
                         n.flash(&a.g, &a.store, id);
                     }
                 }
@@ -942,7 +960,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     let id = g.and_then(|(p, from)| {
                         let thumb = a.store.thumb(from)?;
                         let i = a.store.get(from)?;
-                        let (app, secs) = (i.app.clone(), i.secs);
+                        let (app, secs) = (i.export_app().to_owned(), i.secs);
                         a.store.add(&p, Kind::Gif, &thumb, &app, secs).ok()
                     });
                     match id {
@@ -973,6 +991,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 }
                 a.register();
                 set_notch_hook(n.expanded());
+                n.sync_auto_close();
                 n.repaint();
             }
         }
@@ -998,6 +1017,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
         }
         WM_PICK_FOLDER => {
             n.modal = true;
+            n.sync_auto_close();
             let f = pick_folder(a.main);
             if let (Some(a), Some(n)) = (app(), notch()) {
                 n.modal = false;
@@ -1006,9 +1026,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     a.store.save_settings();
                 }
                 n.repaint();
-                unsafe {
-                    SetTimer(Some(a.main), T_LEAVE, 1500, None);
-                }
+                n.sync_auto_close();
             }
         }
         WM_TIMER => match wp.0 {
@@ -1074,8 +1092,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 }
             }
             id => {
-                n.timer(a, id);
-                if id == T_LEAVE {
+                if n.timer(a, id) {
                     unsafe {
                         SetTimer(Some(h), T_TRIM, 4000, None);
                     }
