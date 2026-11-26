@@ -6,8 +6,8 @@ use crate::overlay::Mode;
 use crate::pointer_timing::{CLOSE_MS, Dwell, OPEN_MS, PANEL_CLOSE_MS, Wake, in_hover_zone};
 use crate::store::{Filter, Kind, Store};
 use crate::{App, T_DWELL, T_FLASH, T_LEAVE, WM_DRAG_OUT, testing};
-use std::collections::HashMap;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
@@ -24,7 +24,11 @@ const PAD: f32 = 16.0;
 const COLS: usize = 4;
 const ROWS: usize = 3;
 const BAR: f32 = 52.0;
+const SETTINGS_ROW: f32 = 33.0;
 const DESK_SHIFT: f32 = 480.0;
+const THUMB_CACHE_LIMIT: usize = 48;
+const THUMB_WARM_LIMIT: usize = 24;
+const THUMB_FRAME_SLICE: Duration = Duration::from_micros(2_500);
 
 mod glyph {
     pub const ADD: u16 = 0xE710;
@@ -39,6 +43,7 @@ mod glyph {
     pub const CHECK: u16 = 0xE73E;
     pub const PINNED: u16 = 0xE841;
     pub const GEAR: u16 = 0xE713;
+    pub const FOLDER: u16 = 0xE8B7;
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -84,6 +89,9 @@ pub enum Btn {
     Step(usize, i64),
     History,
     Login,
+    SaveOnly,
+    HideShot,
+    OpenFolder,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -134,8 +142,10 @@ pub struct Notch {
     apps_scroll: f32,
     just_opened_app: bool,
     lift: HashMap<i64, Anim>,
-    folder_peek: HashMap<i64, Anim>,
     thumbs: HashMap<i64, ID2D1Bitmap1>,
+    thumb_order: VecDeque<i64>,
+    missing_thumbs: HashSet<i64>,
+    was_animating: bool,
     copied: Option<(i64, Instant)>,
     captured: Option<(i64, Instant)>,
     failed: Option<Instant>,
@@ -186,11 +196,14 @@ fn clock(s: i64) -> String {
 /// Shelf filters worth offering.
 fn filters(st: &Store) -> Vec<(usize, &'static str)> {
     let mut v = vec![(0, "All")];
-    if st.has(|i| matches!(i.kind, Kind::Clip | Kind::Gif)) {
+    if st.has(|i| matches!(i.kind, Kind::Clip | Kind::Gif)) || st.filter == Filter::Clips {
         v.push((1, "Clips"));
     }
-    if !st.items.is_empty() {
+    if st.has(|i| !i.hidden) || st.filter == Filter::Apps {
         v.push((2, "App folders"));
+    }
+    if st.has(|i| i.hidden) || st.filter == Filter::Hidden {
+        v.push((3, "Hidden"));
     }
     v
 }
@@ -200,48 +213,13 @@ fn folder_name(app: &str) -> &str {
     if app.is_empty() { "Other (no source)" } else { app }
 }
 
-/// Deterministic muted accents so a folder stays recognizable without app icons.
-fn folder_palette(name: &str) -> (u32, u32, u32) {
-    const PALETTES: [(u32, u32, u32); 5] = [
-        (0x253950, 0x36526e, 0x6887a6),
-        (0x382f4b, 0x514362, 0x88769e),
-        (0x2b3d39, 0x3a5850, 0x6d9b88),
-        (0x413339, 0x5b4951, 0x977a89),
-        (0x43382b, 0x5e4e3a, 0xa08a6b),
-    ];
-    let app = name.trim();
-    let hash = app.bytes().fold(0usize, |v, b| v.wrapping_mul(31).wrapping_add(b.to_ascii_lowercase() as usize));
-    PALETTES[hash % PALETTES.len()]
-}
-
-fn folder_sheet_pose(tile: R, wing: f32, peek: f32) -> (R, f32) {
-    let peek = peek.clamp(0.0, 1.0);
-    let x = tile.cx() - 13.0 + wing * (4.0 + 12.0 * peek);
-    let y = tile.y + 22.0 - 12.0 * peek + 3.0 * wing.abs();
-    let angle = wing * (2.5 + 11.5 * peek);
-    (R::new(x, y, 26.0, 29.0), angle)
-}
-
-fn draw_folder_sheet(c: &Canvas, sheet: R, angle: f32, paper: u32) {
-    let mut parent = Matrix3x2::identity();
-    unsafe { c.ctx.GetTransform(&mut parent) };
-    // In local DIPs: rotate around the sheet's center, then apply the island's DPI/offset transform.
-    let (sin, cos) = angle.to_radians().sin_cos();
-    let (cx, cy) = (sheet.cx(), sheet.cy());
-    let (tx, ty) = (cx - cos * cx + sin * cy, cy - sin * cx - cos * cy);
-    c.transform(&Matrix3x2 {
-        M11: cos * parent.M11 + sin * parent.M21,
-        M12: cos * parent.M12 + sin * parent.M22,
-        M21: -sin * parent.M11 + cos * parent.M21,
-        M22: -sin * parent.M12 + cos * parent.M22,
-        M31: tx * parent.M11 + ty * parent.M21 + parent.M31,
-        M32: tx * parent.M12 + ty * parent.M22 + parent.M32,
-    });
-    c.fill(sheet, 3.0, paper, 1.0);
-    c.stroke(sheet.grow(-0.5), 2.5, 1.0, BLACK, 0.22);
-    c.fill(R::new(sheet.x + 5.0, sheet.y + 5.0, 16.0, 7.0), 1.5, 0x344457, 0.34);
-    c.fill(R::new(sheet.x + 5.0, sheet.y + 15.0, 12.0, 1.5), 0.75, 0x344457, 0.26);
-    c.transform(&parent);
+fn draw_folder_icon(c: &Canvas, x: f32, y: f32) {
+    c.fill(R::new(x + 1.0, y + 7.0, 51.0, 31.0), 6.0, 0x35383e, 1.0);
+    c.fill(R::new(x + 1.0, y + 2.0, 20.0, 15.0), 5.0, 0x35383e, 1.0);
+    c.fill(R::new(x + 2.0, y + 10.0, 49.0, 12.0), 4.0, 0xd0d2d5, 0.9);
+    let front = R::new(x, y + 13.0, 53.0, 27.0);
+    c.fill(front, 5.5, 0x2c2e33, 1.0);
+    c.stroke(front.grow(-0.5), 5.0, 1.0, 0x797b80, 0.68);
 }
 
 pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
@@ -255,7 +233,7 @@ pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
             let k = n.min(3) as f32;
             let tiles = k * TILE.0 + (k - 1.0).max(0.0) * GAP;
             if n == 0 {
-                (PAD * 2.0 + 36.0 * 2.0 + 8.0, 60.0, 22.0)
+                (PAD * 2.0 + 36.0 * 4.0 + 8.0 * 3.0, 60.0, 22.0)
             } else {
                 (PAD * 2.0 + tiles + 46.0, 116.0, 26.0)
             }
@@ -266,7 +244,7 @@ pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
             (w, PAD + rows * (TILE.1 + GAP) + BAR, 28.0)
         }
         View::Menu => (424.0, PAD * 2.0 + 7.0 * 38.0 + 4.0, 28.0),
-        View::Settings => (400.0, PAD * 2.0 + 10.0 * 38.0 + 40.0, 28.0),
+        View::Settings => (400.0, PAD * 2.0 + 11.0 * SETTINGS_ROW + 40.0, 28.0),
         View::Rec => (118.0, 36.0, 16.0),
         View::Flash(_) => (TILE.0 + PAD * 2.0, 116.0, 26.0),
         View::Count(_) | View::Done => {
@@ -369,8 +347,10 @@ impl Notch {
                 apps_scroll: 0.0,
                 just_opened_app: false,
                 lift: HashMap::new(),
-                folder_peek: HashMap::new(),
-                thumbs: HashMap::new(),
+                    thumbs: HashMap::new(),
+                thumb_order: VecDeque::new(),
+                missing_thumbs: HashSet::new(),
+                was_animating: false,
                 copied: None,
                 captured: None,
                 failed: None,
@@ -526,13 +506,25 @@ impl Notch {
     pub fn refresh(&mut self, g: &Gfx, st: &Store) {
         self.sel.retain(|i| st.get(*i).is_some());
         self.thumbs.retain(|i, _| st.get(*i).is_some());
+        self.thumb_order.retain(|i| self.thumbs.contains_key(i));
+        self.missing_thumbs.retain(|i| st.get(*i).is_some());
         self.lift.retain(|i, _| st.get(*i).is_some());
-        self.folder_peek.retain(|i, _| st.get(*i).is_some());
         self.show(g, st, self.view);
     }
 
     pub fn flash(&mut self, g: &Gfx, st: &Store, id: i64) {
         self.captured = Some((id, Instant::now()));
+        if st.get(id).is_some_and(|i| i.hidden) {
+            // No thumbnail upload or Flash view in save-only mode. The rim
+            // pulse is still useful confirmation that a capture was taken.
+            if !self.expanded() {
+                self.show(g, st, View::Rest);
+            } else if self.view == View::Shelf && st.filter == Filter::Hidden {
+                self.refresh(g, st);
+            }
+            self.dirty = true;
+            return;
+        }
         match self.view {
             View::Rest | View::Flash(_) | View::Count(_) | View::Done | View::Rec => {
                 self.show(g, st, View::Flash(id));
@@ -570,10 +562,17 @@ impl Notch {
         self.dirty = true;
     }
 
-    /// Drop thumbnails nobody will look at soon.
+    /// Keep the last viewport warm so repeated short visits don't re-decode it.
     pub fn trim(&mut self, st: &Store) {
-        let keep: Vec<i64> = st.recent().iter().take(3).map(|g| g[0]).collect();
+        let mut keep: HashSet<i64> = self.thumb_order.iter().rev().take(THUMB_WARM_LIMIT).copied().collect();
+        keep.extend(st.recent().iter().take(3).map(|g| g[0]));
         self.thumbs.retain(|i, _| keep.contains(i));
+        self.thumb_order.retain(|i| keep.contains(i));
+    }
+
+    fn touch_thumb(&mut self, id: i64) {
+        self.thumb_order.retain(|&i| i != id);
+        self.thumb_order.push_back(id);
     }
 
     fn max_scroll(&self, st: &Store) -> f32 {
@@ -591,24 +590,22 @@ impl Notch {
     // ── Layout ─────────────────────────────────────────────────────────────
 
     fn tile_rects(&self, st: &Store, v: View, now: Instant) -> Vec<(i64, R)> {
-        let y0 = PAD;
-        groups(st, v)
-            .iter()
-            .enumerate()
-            .filter_map(|(n, g)| match v {
-                View::Peek if n < 3 => Some((g[0], R::new(PAD + n as f32 * (TILE.0 + GAP), y0, TILE.0, TILE.1))),
-                View::Shelf => Some((
-                    g[0],
-                    R::new(
-                        PAD + (n % COLS) as f32 * (TILE.0 + GAP),
-                        y0 + (n / COLS) as f32 * (TILE.1 + GAP) - self.scroll.get(now),
-                        TILE.0,
-                        TILE.1,
-                    ),
-                )),
-                _ => None,
-            })
-            .collect()
+        match v {
+            View::Peek => st.recent().into_iter().take(3).enumerate()
+                .map(|(i, group)| (group[0], R::new(PAD + i as f32 * (TILE.0 + GAP), PAD, TILE.0, TILE.1)))
+                .collect(),
+            View::Shelf => {
+                let scroll = self.scroll.get(now);
+                let first_row = ((scroll / (TILE.1 + GAP)).floor() as usize).saturating_sub(1);
+                st.shelf().into_iter().enumerate().skip(first_row * COLS).take((ROWS + 3) * COLS)
+                    .map(|(i, group)| (group[0], R::new(
+                        PAD + (i % COLS) as f32 * (TILE.0 + GAP),
+                        PAD + (i / COLS) as f32 * (TILE.1 + GAP) - scroll,
+                        TILE.0, TILE.1)))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn shelf_clip(h: f32, w: f32) -> R {
@@ -670,14 +667,16 @@ impl Notch {
         let b = |v: &mut Vec<Spot>, btn, r| v.push(Spot { hit: Hit::B(btn), r });
         match view {
             View::Peek => {
-                if st.items.is_empty() {
-                    b(&mut v, Btn::Capture, R::new(PAD, 12.0, 36.0, 36.0));
-                    b(&mut v, Btn::Settings, R::new(PAD + 44.0, 12.0, 36.0, 36.0));
+                let buttons = [Btn::Capture, Btn::Open, Btn::OpenFolder, Btn::Settings];
+                if st.recent().is_empty() {
+                    for (n, k) in buttons.into_iter().enumerate() {
+                        b(&mut v, k, R::new(PAD + n as f32 * 44.0, 12.0, 36.0, 36.0));
+                    }
                 } else {
                     let x = w - PAD - 36.0;
-                    b(&mut v, Btn::Capture, R::new(x, PAD, 36.0, 26.0));
-                    b(&mut v, Btn::Open, R::new(x, PAD + 29.0, 36.0, 26.0));
-                    b(&mut v, Btn::Settings, R::new(x, PAD + 58.0, 36.0, 26.0));
+                    for (n, k) in buttons.into_iter().enumerate() {
+                        b(&mut v, k, R::new(x, 13.0 + n as f32 * 24.0, 36.0, 22.0));
+                    }
                 }
                 for (id, r) in self.tile_rects(st, view, now) {
                     v.push(Spot { hit: Hit::Tile(id), r });
@@ -698,9 +697,13 @@ impl Notch {
                     b(&mut v, Btn::Settings, R::new(w - PAD - 120.0, y, 36.0, 32.0));
                     let mut x = PAD;
                     if !self.sel.is_empty() {
-                        for k in [Btn::Copy, Btn::Pin, Btn::Delete, Btn::More] {
-                            b(&mut v, k, R::new(x, y, 36.0, 32.0));
-                            x += 42.0;
+                        for k in [Btn::Copy, Btn::Pin, Btn::HideShot, Btn::Delete, Btn::More] {
+                            if k == Btn::HideShot && !self.sel.iter().any(|id| st.get(*id).is_some_and(|i| i.kind == Kind::Shot)) {
+                                continue;
+                            }
+                            let width = if k == Btn::HideShot { 58.0 } else { 36.0 };
+                            b(&mut v, k, R::new(x, y, width, 32.0));
+                            x += width + 6.0;
                         }
                     } else if matches!(st.filter, Filter::App(_)) {
                         b(&mut v, Btn::BackToApps, R::new(x, y, 36.0, 32.0));
@@ -737,7 +740,7 @@ impl Notch {
             }
             View::Settings => {
                 let right = w - PAD;
-                let row = |n: usize| PAD + n as f32 * 38.0 + 4.0;
+                let row = |n: usize| PAD + n as f32 * SETTINGS_ROW + 2.0;
                 for n in 0..4 {
                     b(&mut v, Btn::Key(n), R::new(right - 150.0, row(n), 150.0, 30.0));
                 }
@@ -748,6 +751,7 @@ impl Notch {
                 }
                 b(&mut v, Btn::History, R::new(right - 48.0, row(8), 48.0, 30.0));
                 b(&mut v, Btn::Login, R::new(right - 48.0, row(9), 48.0, 30.0));
+                b(&mut v, Btn::SaveOnly, R::new(right - 48.0, row(10), 48.0, 30.0));
                 let fy = h - PAD - 32.0;
                 b(&mut v, Btn::Close, R::new(PAD, fy, 36.0, 32.0));
                 b(&mut v, Btn::Quit, R::new(right - 68.0, fy, 68.0, 32.0));
@@ -788,26 +792,32 @@ impl Notch {
 
     // ── Drawing ────────────────────────────────────────────────────────────
 
+    fn animating(&self, now: Instant) -> bool {
+        self.w.busy(now)
+            || self.h.busy(now)
+            || self.rad.busy(now)
+            || self.scroll.busy(now)
+            || self.lift.values().any(|a| a.busy(now))
+    }
+
     pub fn busy(&self, now: Instant) -> bool {
         !self.hidden
             && (self.dirty
-                || self.w.busy(now)
-                || self.h.busy(now)
-                || self.rad.busy(now)
-                || self.scroll.busy(now)
+                || self.animating(now)
+                || self.was_animating
                 || self.prev.is_some()
                 || self.copied.is_some()
                 || self.captured.is_some()
                 || self.failed.is_some()
                 || self.working
-                || (now - self.swap).as_secs_f32() < 0.5
-                || self.lift.values().any(|a| a.busy(now))
-                || self.folder_peek.values().any(|a| a.busy(now)))
+                || (now - self.swap).as_secs_f32() < 0.5)
     }
 
-    pub fn draw(&mut self, app: &App) -> Result<()> {
-        let now = Instant::now();
+    pub fn draw_at(&mut self, app: &App, now: Instant) -> Result<()> {
         self.dirty = false;
+        // Repaint once at rest as well, so the last submitted pixels snap to
+        // the actual animation endpoint rather than the previous vsync sample.
+        self.was_animating = self.animating(now);
         self.working = app.jobs > 0;
         let t = (now - self.swap).as_secs_f32();
         let (out, inn) = (t / 0.2, (t - 0.07) / 0.4);
@@ -826,8 +836,9 @@ impl Notch {
             self.failed = None;
         }
         let cap_t = self.captured.map(|(_, at)| (now - at).as_secs_f32());
-        // Load whatever this frame needs before drawing.
-        let need: Vec<i64> = match self.view {
+        // Render cached tiles immediately. Stagger cold thumbnail decodes across
+        // frames; a large shelf/scroll shouldn't run every decode in one frame.
+        let mut need: Vec<i64> = match self.view {
             View::Flash(id) => vec![id],
             View::Shelf if app.store.filter == Filter::Apps => Vec::new(),
             v => self
@@ -837,12 +848,27 @@ impl Notch {
                 .map(|t| t.0)
                 .collect(),
         };
+        if let Some(drag_id) = self.drag.as_ref().and_then(|d| d.ids.first()).copied().filter(|id| !need.contains(id)) {
+            need.insert(0, drag_id);
+        }
         let (view, prev, s) = (self.view, self.prev, self.s);
         let mut fresh: Vec<(i64, Frame)> = Vec::new();
+        let decode_start = Instant::now();
+        let mut attempted = 0;
         for id in need {
-            if !self.thumbs.contains_key(&id) {
+            if self.thumbs.contains_key(&id) {
+                self.touch_thumb(id);
+            } else if !self.missing_thumbs.contains(&id) {
+                if attempted > 0 && (attempted >= 2 || decode_start.elapsed() >= THUMB_FRAME_SLICE) {
+                    self.dirty = true;
+                    continue;
+                }
+                attempted += 1;
                 if let Some(f) = app.store.thumb(id) {
                     fresh.push((id, f));
+                } else {
+                    // A bad row must not turn an idle notch into a retry loop.
+                    self.missing_thumbs.insert(id);
                 }
             }
         }
@@ -869,6 +895,7 @@ impl Notch {
                 }
             }
             c.clip(island, || {
+                let fade_bounds = R::new(-EAR, 0.0, WIN.0 + 2.0 * EAR, WIN.1);
                 let shifted = |v: View| {
                     let (tw, _, _) = size(&app.g, &app.store, v);
                     Matrix3x2 { M31: (WIN.0 - tw) / 2.0 * s, ..base }
@@ -876,12 +903,12 @@ impl Notch {
                 if let (Some(p), true) = (prev, out < 1.0) {
                     let k = Curve::Standard.at(out);
                     c.transform(&shifted(p));
-                    c.layer(9.0 * k, 1.0 - k, |c| me.content(c, app, p, now, &loaded, false));
+                    c.fade(fade_bounds, 1.0 - k, |c| me.content(c, app, p, now, &loaded, false));
                 }
                 if inn > 0.0 {
                     let k = Curve::Emphasized.at(inn);
                     c.transform(&shifted(view));
-                    c.layer(10.0 * (1.0 - k), k, |c| me.content(c, app, view, now, &loaded, true));
+                    c.fade(fade_bounds, k, |c| me.content(c, app, view, now, &loaded, true));
                 }
                 c.transform(&base);
                 if let Some(ct) = cap_t.filter(|&ct| ct < 0.58) {
@@ -893,7 +920,7 @@ impl Notch {
                     c.fill(R::new(island.cx() - bw * 0.3, island.y + island.h - 4.5, bw * 0.6, 2.5), 1.25, INK, 0.65 * fade);
                 }
                 if me.working {
-                    let t = me.born.elapsed().as_secs_f32() * 0.9 % 1.0;
+                    let t = (now - me.born).as_secs_f32() * 0.9 % 1.0;
                     let k = (t * std::f32::consts::PI).sin();
                     let x = island.x + 16.0 + (island.w - 32.0 - 34.0) * Curve::Standard.at(t);
                     c.fill(R::new(x, island.y + island.h - 4.0, 34.0, 2.0), 1.0, INK, 0.8 * k);
@@ -904,7 +931,19 @@ impl Notch {
                 }
             });
         });
-        self.thumbs.extend(loaded);
+        for (id, _) in &fresh {
+            if !loaded.iter().any(|(uploaded, _)| uploaded == id) {
+                self.missing_thumbs.insert(*id);
+            }
+        }
+        for (id, bitmap) in loaded {
+            self.thumbs.insert(id, bitmap);
+            self.touch_thumb(id);
+        }
+        while self.thumbs.len() > THUMB_CACHE_LIMIT {
+            let Some(id) = self.thumb_order.pop_front() else { break };
+            self.thumbs.remove(&id);
+        }
         res
     }
 
@@ -933,6 +972,9 @@ impl Notch {
             View::Rest => {
                 if app.interval.is_some() {
                     c.circle(w / 2.0, h / 2.0, 2.2, RED, 1.0);
+                }
+                if app.store.settings.save_only {
+                    c.circle(w - 20.0, h / 2.0, 2.0, DIM, 0.92);
                 }
                 // One dot for each thing left to paste.
                 let left = app.queue.len().min(14);
@@ -972,6 +1014,10 @@ impl Notch {
                 }
                 round(Btn::Capture, glyph::ADD, INK);
                 round(Btn::Open, glyph::DOWN, INK);
+                round(Btn::OpenFolder, glyph::FOLDER, INK);
+                if let (true, Some(r)) = (app.store.settings.save_only, at(Btn::OpenFolder)) {
+                    c.circle(r.x + r.w - 5.5, r.y + 5.5, 2.0, GREEN, 0.95);
+                }
                 round(Btn::Settings, glyph::GEAR, INK);
                 self.drag_layer(c, app, v, now, extra, live);
             }
@@ -982,14 +1028,22 @@ impl Notch {
                     let rects = self.tile_rects(&app.store, v, now);
                     if app_folders {
                         let folders = app.store.shelf();
-                        for ((id, r), folder) in rects.into_iter().zip(folders) {
+                        for (id, r) in rects {
                             if r.y + r.h > clip.y && r.y < clip.y + clip.h {
-                                self.app_folder(c, app, (id, folder.len()), r, now, live);
+                                if let Some(folder) = folders.iter().find(|f| f[0] == id) {
+                                    self.app_folder(c, app, (id, folder.len()), r, live);
+                                }
                             }
                         }
                     } else {
-                        if rects.is_empty() && matches!(app.store.filter, Filter::App(_)) {
-                            c.text("No captures in this folder", clip, 14.0, DIM, 1.0, Align::Center);
+                        if rects.is_empty() {
+                            let label = match app.store.filter {
+                                Filter::App(_) => "No visible captures in this folder",
+                                Filter::Hidden => "No hidden screenshots",
+                                Filter::Clips => "No clips yet",
+                                _ => "No visible captures yet",
+                            };
+                            c.text(label, clip, 14.0, DIM, 1.0, Align::Center);
                         }
                         for (id, r) in rects {
                             if r.y + r.h > clip.y - 8.0 && r.y < clip.y + clip.h {
@@ -1012,6 +1066,7 @@ impl Notch {
                     let pinned = self.sel.iter().all(|i| app.store.get(*i).is_some_and(|i| i.pinned));
                     round(Btn::Copy, glyph::COPY, INK);
                     round(Btn::Pin, if pinned { glyph::UNPIN } else { glyph::PIN }, INK);
+                    pill(Btn::HideShot, if app.store.filter == Filter::Hidden { "Show" } else { "Hide" }, INK);
                     round(Btn::Delete, glyph::TRASH, if hover(Btn::Delete) { RED } else { INK });
                     round(Btn::More, if self.more { glyph::BACK } else { glyph::NEXT }, INK);
                     for (b, t, _) in self.actions(&app.g, &app.store) {
@@ -1028,6 +1083,7 @@ impl Notch {
                     let now_on = match app.store.filter {
                         Filter::All => 0,
                         Filter::Clips => 1,
+                        Filter::Hidden => 3,
                         _ => 2,
                     };
                     for (k, t) in filters(&app.store) {
@@ -1076,10 +1132,11 @@ impl Notch {
                     "Interval",
                     "Copied images",
                     "Launch at login",
+                    "Save screenshots without preview",
                 ];
                 for (n, t) in rows.iter().enumerate() {
-                    let y = PAD + n as f32 * 38.0;
-                    c.text(t, R::new(PAD + 6.0, y, 200.0, 38.0), 14.0, INK, 1.0, Align::Left);
+                    let y = PAD + n as f32 * SETTINGS_ROW;
+                    c.text(t, R::new(PAD + 6.0, y, 240.0, SETTINGS_ROW), 14.0, INK, 1.0, Align::Left);
                 }
                 for (n, k) in s.keys().into_iter().enumerate() {
                     let name = if self.recording == Some(n) { "Press keys".into() } else { key_name(k) };
@@ -1111,13 +1168,16 @@ impl Notch {
                         }
                     }
                 }
-                for (b, on) in [(Btn::History, s.history), (Btn::Login, app.login)] {
+                for (b, on) in [(Btn::History, s.history), (Btn::Login, app.login), (Btn::SaveOnly, s.save_only)] {
                     let Some(r) = at(b) else { continue };
                     let t = R::new(r.x, r.y + 2.0, 46.0, 26.0);
                     c.fill(t, 13.0, if on { INK } else { PILL_HOVER }, 1.0);
                     c.circle(if on { t.x + 33.0 } else { t.x + 13.0 }, t.cy(), 9.5, if on { BLACK } else { DIM }, 1.0);
                 }
                 round(Btn::Close, glyph::BACK, INK);
+                if let Some(r) = at(Btn::Close) {
+                    c.text("Ctrl+O: folder   ·   Ctrl+H: hidden", R::new(r.x + 42.0, r.y, 244.0, r.h), 11.0, DIM, 1.0, Align::Left);
+                }
                 pill(Btn::Quit, "Quit", if hover(Btn::Quit) { RED } else { DIM });
             }
         }
@@ -1149,54 +1209,19 @@ impl Notch {
         }
     }
 
-    fn app_folder(&self, c: &Canvas, app: &App, folder: (i64, usize), r: R, now: Instant, live: bool) {
-        let (id, count) = folder;
+    fn app_folder(&self, c: &Canvas, app: &App, (id, count): (i64, usize), r: R, live: bool) {
         let Some(item) = app.store.get(id) else { return };
         let hit = Hit::AppFolder(id);
+        let hover = live && self.hover == Some(hit);
         let pressed = live && self.press.is_some_and(|(h, ..)| h == hit);
-        let peek = if live { self.folder_peek.get(&id).map_or(0.0, |a| a.get(now)) } else { 0.0 };
         let r = if pressed { r.scale(0.97) } else { r };
-
-        c.fill(r, 12.0, 0x16181d, 1.0);
-        c.fill(r, 12.0, 0x252b34, 0.78 * peek);
-        c.stroke(r.grow(-0.5), 11.5, 1.0, INK, 0.09 + 0.09 * peek);
-
-        let (back, face, edge) = folder_palette(&item.app);
-        let x = r.cx() - 34.0;
-        let y = r.y;
-        // The tab belongs to the back wall, with papers drawn between it and the front flap.
-        c.fill(R::new(x + 1.0, y + 30.0, 67.0, 24.0), 6.0, BLACK, 0.36);
-        c.fill(R::new(x + 1.0, y + 22.0, 66.0, 28.0), 5.5, back, 1.0);
-        c.fill(R::new(x + 2.0, y + 17.0, 24.0, 13.0), 4.0, back, 1.0);
-        c.line((x + 6.0, y + 18.0), (x + 21.0, y + 18.0), 1.0, edge, 0.55);
-        let wings: &[f32] = match count {
-            0 => &[],
-            1 => &[0.0],
-            2 => &[-0.65, 0.65],
-            _ => &[-1.0, 1.0, 0.0],
-        };
-        for (layer, &wing) in wings.iter().enumerate() {
-            let paper = if layer + 1 == wings.len() { 0xd9e1e9 } else { 0x9cabc0 };
-            let (sheet, angle) = folder_sheet_pose(r, wing, peek);
-            draw_folder_sheet(c, sheet, angle, paper);
-        }
-
-        let flap = R::new(x, y + 31.0 + 2.0 * peek, 68.0, 20.0 - 2.0 * peek);
-        c.fill(flap, 5.5, face, 1.0);
-        c.stroke(flap.grow(-0.5), 5.0, 1.0, edge, 0.68);
-        c.line(
-            (flap.x + 6.0, flap.y + 2.0),
-            (flap.x + flap.w - 6.0, flap.y + 2.0),
-            1.0, INK, 0.16 + 0.13 * peek,
-        );
-
+        c.fill(r, 12.0, if hover { 0x25272b } else { 0x18191c }, 1.0);
+        c.stroke(r.grow(-0.5), 11.5, 1.0, INK, if hover { 0.22 } else { 0.09 });
+        draw_folder_icon(c, r.cx() - 26.5, r.y + 6.0);
         let name = fitted(&app.g, folder_name(&item.app), 13.0, r.w - 20.0);
-        c.text(&name, R::new(r.x + 10.0, y + 53.0, r.w - 20.0, 17.0), 13.0, INK, 1.0, Align::Center);
-        let item_count = if count == 1 { "1 capture".to_string() } else { format!("{count} captures") };
-        c.text(&item_count, R::new(r.x + 10.0, y + 69.0, r.w - 20.0, 12.0), 10.5, DIM, 1.0, Align::Center);
-        if peek > 0.01 {
-            c.icon(glyph::NEXT, R::new(r.x + r.w - 24.0, y + 13.0, 15.0, 22.0), 11.0, INK, 0.66 * peek);
-        }
+        c.text(&name, R::new(r.x + 10.0, r.y + 48.0, r.w - 20.0, 18.0), 13.0, INK, 1.0, Align::Center);
+        let label = plural(count as i64, "capture");
+        c.text(&label, R::new(r.x + 10.0, r.y + 66.0, r.w - 20.0, 13.0), 10.5, DIM, 1.0, Align::Center);
     }
 
     fn bitmap<'a>(&'a self, id: i64, extra: &'a [(i64, ID2D1Bitmap1)]) -> Option<&'a ID2D1Bitmap1> {
@@ -1246,6 +1271,11 @@ impl Notch {
         if group.iter().any(|g| app.clip.contains(g)) {
             // Outside the tile, so it shows on white shots too.
             c.stroke(r.grow(3.0), 13.0, 2.0, INK, a);
+        }
+        if item.hidden {
+            let p = R::new(r.x + 6.0, r.y + 6.0, 18.0, 18.0);
+            c.fill(p, 9.0, BLACK, 0.82 * a);
+            c.icon(glyph::FOLDER, p, 10.0, INK, a);
         }
         if item.pinned {
             let p = R::new(r.x + 6.0, r.y + r.h - 26.0, 20.0, 20.0);
@@ -1343,7 +1373,7 @@ impl Notch {
         match (ctrl, shift, key) {
             (false, false, VK_ESCAPE) => true,
             (true, false, VK_A) => match self.view {
-                View::Peek => !app.store.items.is_empty(),
+                View::Peek => app.store.has(|i| !i.hidden),
                 View::Shelf => app.store.filter != Filter::Apps && !app.store.shelf().is_empty(),
                 _ => false,
             },
@@ -1351,7 +1381,10 @@ impl Notch {
                 !self.sel.is_empty() || matches!(self.hover, Some(Hit::Tile(_) | Hit::Check(_)))
             }
             (true, false, VK_D) => !self.sel.is_empty(),
-            (true, false, VK_OEM_COMMA) => true,
+            (true, false, VK_OEM_COMMA | VK_O | VK_H | VK_1 | VK_2 | VK_3) => true,
+            (true, true, VK_H) => true,
+            (false, false, VK_H) if matches!(self.view, View::Peek | View::Shelf) => self
+                .shot_targets(&app.store).into_iter().any(|id| app.store.get(id).is_some_and(|i| i.kind == Kind::Shot)),
             (false, false, VK_DELETE) => self.view == View::Shelf && !self.sel.is_empty(),
             (false, false, VK_BACK) => self.view == View::Shelf
                 && (!self.sel.is_empty() || matches!(app.store.filter, Filter::App(_))),
@@ -1367,7 +1400,17 @@ impl Notch {
         }
         let ctrl = mods & MOD_CONTROL.0 != 0;
         let key = VIRTUAL_KEY(vk as u16);
+        if ctrl && key == VK_H && mods & MOD_SHIFT.0 != 0 {
+            self.button(app, Btn::SaveOnly);
+            return;
+        }
         match (ctrl, key) {
+            (true, VK_1) => self.switch_shelf(app, Filter::All),
+            (true, VK_2) => self.switch_shelf(app, Filter::Clips),
+            (true, VK_3) => self.switch_shelf(app, Filter::Apps),
+            (true, VK_H) => self.switch_shelf(app, Filter::Hidden),
+            (true, VK_O) => self.button(app, Btn::OpenFolder),
+            (false, VK_H) => self.button(app, Btn::HideShot),
             (true, VK_A) => {
                 if self.view == View::Peek {
                     app.store.filter = Filter::All;
@@ -1443,14 +1486,6 @@ impl Notch {
             if let Some(i) = b {
                 self.lift.entry(i).or_insert(Anim::new(0.0)).go(1.0, 0.22, Curve::Emphasized);
             }
-        }
-        if let Some(Hit::AppFolder(id)) = self.hover {
-            if let Some(peek) = self.folder_peek.get_mut(&id) {
-                peek.go(0.0, 0.18, Curve::Standard);
-            }
-        }
-        if let Some(Hit::AppFolder(id)) = h {
-            self.folder_peek.entry(id).or_insert(Anim::new(0.0)).go(1.0, 0.25, Curve::Emphasized);
         }
         self.hover = h;
         self.dirty = true;
@@ -1769,8 +1804,7 @@ impl Notch {
     pub fn wheel(&mut self, app: &mut App, delta: f32) {
         match self.view {
             View::Peek if delta < 0.0 && !app.store.items.is_empty() => {
-                app.store.filter = Filter::All;
-                self.show(&app.g, &app.store, View::Shelf);
+                self.button(app, Btn::Open);
             }
             View::Shelf => {
                 let to = (self.scroll.to - delta / 120.0 * (TILE.1 + GAP)).clamp(0.0, self.max_scroll(&app.store));
@@ -1787,18 +1821,61 @@ impl Notch {
         self.refresh(&app.g, &app.store);
     }
 
+    fn shot_targets(&self, store: &Store) -> Vec<i64> {
+        if !self.sel.is_empty() {
+            self.sel.clone()
+        } else if let Some(Hit::Tile(id) | Hit::Check(id)) = self.hover {
+            group_of(store, self.view, id)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn switch_shelf(&mut self, app: &mut App, filter: Filter) {
+        app.store.filter = filter;
+        self.sel.clear();
+        self.more = false;
+        self.scroll.jump(0.0);
+        self.show(&app.g, &app.store, View::Shelf);
+    }
+
     fn button(&mut self, app: &mut App, b: Btn) {
         match b {
             Btn::Capture => self.show(&app.g, &app.store, View::Menu),
             Btn::Open => {
-                app.store.filter = Filter::All;
-                self.show(&app.g, &app.store, View::Shelf);
+                let filter = if !app.store.has(|i| !i.hidden) && app.store.has(|i| i.hidden) {
+                    Filter::Hidden
+                } else {
+                    Filter::All
+                };
+                self.switch_shelf(app, filter);
+            }
+            Btn::OpenFolder => {
+                let folder = &app.store.settings.folder;
+                if std::fs::create_dir_all(folder).is_ok() {
+                    crate::clip::open_file(folder);
+                } else {
+                    self.fail();
+                }
+            }
+            Btn::HideShot => {
+                let targets = self.shot_targets(&app.store);
+                let hidden = app.store.filter != Filter::Hidden || self.view != View::Shelf;
+                if app.store.set_hidden(&targets, hidden).is_ok() {
+                    self.sel.clear();
+                    self.more = false;
+                    self.refresh(&app.g, &app.store);
+                } else {
+                    self.fail();
+                }
+            }
+            Btn::SaveOnly => {
+                app.store.settings.save_only = !app.store.settings.save_only;
+                app.store.save_settings();
             }
             Btn::BackToApps => self.back_to_apps(app),
             Btn::Filter(n) => {
-                app.store.filter = [Filter::All, Filter::Clips, Filter::Apps][n].clone();
-                self.scroll.jump(0.0);
-                self.refresh(&app.g, &app.store);
+                self.switch_shelf(app, [Filter::All, Filter::Clips, Filter::Apps, Filter::Hidden][n].clone());
             }
             Btn::Close => self.show(&app.g, &app.store, View::Peek),
             Btn::Settings => self.show(&app.g, &app.store, View::Settings),
@@ -1960,33 +2037,4 @@ pub fn message(n: &mut Notch, app: &mut App, msg: u32, w: WPARAM, l: LPARAM) -> 
         _ => return false,
     }
     true
-}
-
-#[cfg(test)]
-mod folder_tests {
-    use super::*;
-
-    #[test]
-    fn folder_sheet_fan_rises_and_stays_inside_the_tile() {
-        let tile = R::new(16.0, 16.0, TILE.0, TILE.1);
-        let (closed, closed_angle) = folder_sheet_pose(tile, -1.0, 0.0);
-        let (left, left_angle) = folder_sheet_pose(tile, -1.0, 1.0);
-        let (right, right_angle) = folder_sheet_pose(tile, 1.0, 1.0);
-        assert!(left.x < closed.x && left.y < closed.y && left_angle < closed_angle);
-        assert_eq!(left_angle, -right_angle);
-        assert_eq!(left.cx() + right.cx(), tile.cx() * 2.0);
-        // Even the rotated sheet's corners remain inside the non-text area.
-        for (sheet, angle) in [(left, left_angle), (right, right_angle)] {
-            let (sin, cos) = angle.to_radians().sin_cos();
-            for (x, y) in [(-13.0, -14.5), (13.0, -14.5), (13.0, 14.5), (-13.0, 14.5)] {
-                let point = (sheet.cx() + cos * x - sin * y, sheet.cy() + sin * x + cos * y);
-                assert!(R::new(tile.x, tile.y, tile.w, 53.0).has(point.0, point.1));
-            }
-        }
-    }
-
-    #[test]
-    fn app_folder_color_is_stable_for_case_and_padding() {
-        assert_eq!(folder_palette("  Premiere Pro "), folder_palette("premiere pro"));
-    }
 }

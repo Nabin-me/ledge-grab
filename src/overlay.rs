@@ -160,6 +160,7 @@ pub struct Overlay {
     bar_hover: Option<Bar>,
     bar_y: Anim,
     dim: Anim,
+    was_animating: bool,
     fly: Option<Fly>,
     ocr_started: bool,
     pub opened_ms: f64,
@@ -265,6 +266,7 @@ impl Overlay {
             bar_hover: None,
             bar_y: Anim::new(-70.0),
             dim: Anim::new(0.0),
+            was_animating: false,
             fly: None,
             ocr_started: false,
             opened_ms: 0.0,
@@ -404,12 +406,18 @@ impl Overlay {
     // ── Drawing ────────────────────────────────────────────────────────────
 
     pub fn busy(&self, now: Instant) -> bool {
-        self.fly.is_some() || self.dim.busy(now) || self.bar_y.busy(now) || self.panes.iter().any(|p| p.dirty)
+        self.fly.is_some() || self.was_animating || self.dim.busy(now) || self.bar_y.busy(now)
+            || self.panes.iter().any(|p| p.dirty)
     }
 
     pub fn draw(&mut self, g: &Gfx, vsync: bool) -> Result<()> {
-        let now = Instant::now();
-        let anim = self.dim.busy(now) || self.bar_y.busy(now);
+        self.draw_at(g, Instant::now(), vsync)
+    }
+
+    pub fn draw_at(&mut self, g: &Gfx, now: Instant, vsync: bool) -> Result<()> {
+        let moving = self.dim.busy(now) || self.bar_y.busy(now);
+        let anim = moving || self.was_animating;
+        self.was_animating = moving;
         if let Some(mut fly) = self.fly.take() {
             let t = fly.at.progress(now);
             let k = fly.at.get(now);

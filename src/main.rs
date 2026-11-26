@@ -47,6 +47,10 @@ pub const WM_PICK_FOLDER: u32 = WM_APP + 5;
 const WM_PASTED: u32 = WM_APP + 6;
 const WM_NOTCH_KEY: u32 = WM_APP + 7;
 
+// Give motion a chance under a continuous stream of pointer/keyboard messages.
+// A single handler can still exceed the budget; never interrupt one mid-dispatch.
+const INPUT_SLICE: Duration = Duration::from_millis(4);
+
 pub const T_DWELL: usize = 1;
 pub const T_LEAVE: usize = 2;
 pub const T_FLASH: usize = 3;
@@ -136,6 +140,47 @@ pub fn note(s: &str) {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
             let _ = writeln!(f, "{s}");
         }
+    }
+}
+
+/// Opt-in timing for the Windows smoke test. Collect in memory and write at
+/// idle, rather than adding a disk write to every timed frame.
+struct FrameTrace {
+    path: PathBuf,
+    start: Instant,
+    frames: Vec<(u128, u128, bool, bool)>,
+}
+
+impl FrameTrace {
+    fn start() -> Option<Self> {
+        if !testing() {
+            return None;
+        }
+        Some(Self {
+            path: std::env::var_os("LEDGE_GRAB_FRAME_LOG")?.into(),
+            start: Instant::now(),
+            frames: Vec::with_capacity(4096),
+        })
+    }
+
+    fn record(&mut self, sample: Instant, notch: bool, overlay: bool) {
+        if self.frames.len() < self.frames.capacity() {
+            self.frames.push(((sample - self.start).as_micros(), sample.elapsed().as_micros(), notch, overlay));
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.frames.is_empty() {
+            return;
+        }
+        use std::io::Write;
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+            let mut out = std::io::BufWriter::new(f);
+            for &(start, render, notch, overlay) in &self.frames {
+                let _ = writeln!(out, "{start},{render},{},{}", u8::from(notch), u8::from(overlay));
+            }
+        }
+        self.frames.clear();
     }
 }
 
@@ -753,7 +798,11 @@ pub fn set_notch_hook(on: bool) {
                             }
                         }
                         if n.wants_key(a, mods, k.vkCode) {
-                            let _ = PostMessageW(Some(a.main), WM_NOTCH_KEY, WPARAM(mods as usize), LPARAM(k.vkCode as isize));
+                            // In a low-level hook key state is the state before this
+                            // event. A held H should not flip save-only repeatedly.
+                            if k.vkCode != VK_H.0 as u32 || !down(VK_H) {
+                                let _ = PostMessageW(Some(a.main), WM_NOTCH_KEY, WPARAM(mods as usize), LPARAM(k.vkCode as isize));
+                            }
                             return LRESULT(1);
                         }
                     }
@@ -1214,37 +1263,57 @@ fn main() {
             n.start();
         }
         let mut msg = MSG::default();
+        let mut trace = FrameTrace::start();
         loop {
+            let input_start = Instant::now();
+            let mut drained = true;
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
+                    if let Some(trace) = &mut trace {
+                        trace.flush();
+                    }
                     return;
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+                if input_start.elapsed() >= INPUT_SLICE {
+                    drained = false;
+                    break;
+                }
             }
             let (a, n) = (&mut *ap, &mut *np);
             let now = Instant::now();
-            let mut idle = true;
+            let draw_notch = n.busy(now);
+            let mut draw_overlay = false;
             if let Some(mut o) = a.overlay.take() {
                 if o.landed(now) {
                     o.close();
                 } else {
-                    if o.busy(now) {
-                        idle = false;
-                        if o.draw(&a.g, true).is_err() {
+                    draw_overlay = o.busy(now);
+                    if draw_overlay {
+                        // Submit both surfaces from the same animation sample, with
+                        // at most one vsynced Present (the last surface submitted).
+                        if o.draw_at(&a.g, now, !draw_notch).is_err() {
                             restart();
                         }
                     }
                     a.overlay = Some(o);
                 }
             }
-            if n.busy(now) {
-                idle = false;
-                if n.draw(a).is_err() {
+            if draw_notch {
+                if n.draw_at(a, now).is_err() {
                     restart();
                 }
             }
-            if idle {
+            if let Some(trace) = &mut trace {
+                if draw_notch || draw_overlay {
+                    trace.record(now, draw_notch, draw_overlay);
+                }
+            }
+            if drained && !draw_notch && !draw_overlay {
+                if let Some(trace) = &mut trace {
+                    trace.flush();
+                }
                 let _ = WaitMessage();
             }
         }

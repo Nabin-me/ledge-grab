@@ -72,12 +72,14 @@ Press `B` and Ledge Grab automatically outlines emails, card numbers, phone numb
 |---|---|
 | **Hover the ledge** | Pause over the top-edge badge to peek at your last three shots, or click the badge to open immediately. Click a capture to copy it. |
 | **`+`** | Every capture mode at a glance. |
-| **`⌄`** | Expand the shelf to browse everything you captured this week. |
-| **`⚙`** | Open Settings directly from the ledge (hotkeys, folder, retention, copied images, launch at login, quit). |
+| **`⌄`** | Expand the shelf to browse your capture history. |
+| **Folder icon** | Open your on-disk capture folder in Explorer. A tiny dot means save-only is on. |
+| **`⚙`** | Open Settings directly from the ledge (hotkeys, folder, retention, copied images, save-only, launch at login, quit). |
 | **Drag a tile out** | Drops the actual file directly into Slack, Discord, browsers, or any app. |
 | **Drop a tile on another** | Stacks related shots together. |
 | **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, paste queue, stack, or convert a clip to GIF. |
-| **All · Clips · App folders** | Browse all captures, view clips, or browse by app. Hover a folder to fan its file cards; click it to open. Use Back or `Esc` to return. |
+| **All · Clips · App folders · Hidden** | Browse visible captures, clips, by app, or hidden screenshots. Click a folder icon to browse that app; Back or `Esc` returns to folders. |
+| **Hide / Show** | Select a screenshot in the shelf and use Hide. In Hidden, select a screenshot and use Show to restore its normal visibility. Neither action moves or deletes a file. |
 | **Ledge shortcuts** | While the ledge is open: `Ctrl`+`A` select all, `Shift`+Click range select, `Ctrl`+`C` copy selected, `Del` delete selected, `P` pin/unpin, `Ctrl`+`D` deselect, `Ctrl`+`,` settings, `Esc` back/close. |
 
 Shots roll off the ledge after seven days unless pinned. The files stay in your save folder. New captures are saved by local calendar day, then source app, for example:
@@ -86,7 +88,19 @@ Shots roll off the ledge after seven days unless pinned. The files stay in your 
 Pictures\Ledge Grab\2026-11-25\Notepad\2026-11-25 14.30.52.017 1.png
 ```
 
-Existing files stay in their original locations and remain accessible through history. The shelf's **App folders** view collects each app's visible captures across dates. The shelf stays open while you use it and briefly after the pointer leaves, so a quick slip off an edge won't close it.
+Existing files stay in their original locations. In Settings, **Save screenshots without preview** keeps new screenshots off the peek and skips the thumbnail pop-up while keeping the normal save and copy behavior. Use **Hidden** to find or restore them before they age out of history, or open the save folder at any time. This switch does not hide older visible screenshots retroactively or alter video recordings.
+
+New shortcuts are active only while the ledge is open and the pointer is over it:
+
+| Shortcut | Action |
+|---|---|
+| `H` | Hide selected or hovered screenshots; show them again when viewing Hidden |
+| `Ctrl`+`H` | Open Hidden |
+| `Ctrl`+`Shift`+`H` | Toggle save-only for future screenshots |
+| `Ctrl`+`O` | Open the capture folder in Explorer |
+| `Ctrl`+`1` / `2` / `3` | Open All / Clips / App folders |
+
+The shelf's **App folders** view collects each app's visible captures across dates. The shelf stays open while you use it and briefly after the pointer leaves, so a quick slip off an edge won't close it.
 
 - **Float** pins any capture above all windows — drag to move, scroll to resize, `Ctrl` + scroll to fade opacity, right-click to close.
 - **Queue** pastes your selected picks in order, advancing automatically on every `Ctrl` + `V`.

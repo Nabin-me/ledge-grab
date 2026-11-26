@@ -37,6 +37,8 @@ impl Kind {
 pub enum Filter {
     All,
     Clips,
+    /// Shots still on disk but intentionally omitted from normal previews.
+    Hidden,
     /// One folder per app.
     Apps,
     App(String),
@@ -49,6 +51,7 @@ pub struct Item {
     pub kind: Kind,
     pub created: i64,
     pub pinned: bool,
+    pub hidden: bool,
     pub ord: f64,
     pub stack: i64,
     /// Where it came from.
@@ -83,6 +86,8 @@ pub struct Settings {
     pub clip: (u32, u32),
     /// Keep images copied in other apps.
     pub history: bool,
+    /// Save new screenshots without adding them to visible previews.
+    pub save_only: bool,
     pub keep_days: i64,
     pub delay: i64,
     pub interval: i64,
@@ -99,7 +104,7 @@ pub struct Store {
 
 /// Folders are independent of capture stacks and show the most recent app first.
 fn group_by_app(items: &[Item]) -> Vec<Vec<i64>> {
-    let mut by_time: Vec<&Item> = items.iter().collect();
+    let mut by_time: Vec<&Item> = items.iter().filter(|i| !i.hidden).collect();
     by_time.sort_by_key(|i| std::cmp::Reverse((i.created, i.id)));
     let mut indices = std::collections::HashMap::<&str, usize>::new();
     let mut folders: Vec<Vec<i64>> = Vec::new();
@@ -194,7 +199,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT NOT NULL);",
         )?;
         // Added after the first version.
-        for c in ["app TEXT NOT NULL DEFAULT ''", "preview TEXT NOT NULL DEFAULT ''", "body TEXT", "secs INTEGER NOT NULL DEFAULT 0"] {
+        for c in ["app TEXT NOT NULL DEFAULT ''", "preview TEXT NOT NULL DEFAULT ''", "body TEXT", "secs INTEGER NOT NULL DEFAULT 0", "hidden INTEGER NOT NULL DEFAULT 0"] {
             let _ = db.execute(&format!("ALTER TABLE items ADD COLUMN {c}"), []);
         }
         use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -208,6 +213,7 @@ impl Store {
                 window: (MOD_ALT.0, VK_SNAPSHOT.0 as u32),
                 clip: (MOD_SHIFT.0, VK_SNAPSHOT.0 as u32),
                 history: true,
+                save_only: false,
                 keep_days: 7,
                 delay: 3,
                 interval: 60,
@@ -238,6 +244,7 @@ impl Store {
             window: pair(self.kv("window"), d.window),
             clip: pair(self.kv("clip"), d.clip),
             history: self.kv("history").map(|v| v == "1").unwrap_or(d.history),
+            save_only: self.kv("save_only").map(|v| v == "1").unwrap_or(d.save_only),
             keep_days: num(self.kv("keep_days"), d.keep_days),
             delay: num(self.kv("delay"), d.delay),
             interval: num(self.kv("interval"), d.interval),
@@ -258,6 +265,7 @@ impl Store {
             put(k, format!("{},{}", v.0, v.1));
         }
         put("history", (s.history as i64).to_string());
+        put("save_only", (s.save_only as i64).to_string());
         put("keep_days", s.keep_days.to_string());
         put("delay", s.delay.to_string());
         put("interval", s.interval.to_string());
@@ -270,7 +278,7 @@ impl Store {
     pub fn reload(&mut self) -> rusqlite::Result<()> {
         let mut q = self
             .db
-            .prepare("SELECT id,path,kind,created,pinned,ord,stack,app,secs FROM items WHERE kind != 3 ORDER BY pinned DESC, ord DESC")?;
+            .prepare("SELECT id,path,kind,created,pinned,ord,stack,app,secs,hidden FROM items WHERE kind != 3 ORDER BY pinned DESC, ord DESC")?;
         let all: Vec<Item> = q
             .query_map([], |r| {
                 Ok(Item {
@@ -283,6 +291,7 @@ impl Store {
                     stack: r.get(6)?,
                     app: r.get(7)?,
                     secs: r.get(8)?,
+                    hidden: r.get(9)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -326,14 +335,15 @@ impl Store {
 
     /// The notch's first row.
     pub fn recent(&self) -> Vec<Vec<i64>> {
-        self.groups(|_| true)
+        self.groups(|i| !i.hidden)
     }
 
     pub fn shelf(&self) -> Vec<Vec<i64>> {
         match &self.filter {
-            Filter::All => self.groups(|_| true),
+            Filter::All => self.groups(|i| !i.hidden),
             Filter::Clips => self.groups(|i| matches!(i.kind, Kind::Clip | Kind::Gif)),
-            Filter::App(a) => self.groups(|i| i.app.trim() == a.as_str()),
+            Filter::App(a) => self.groups(|i| !i.hidden && i.app.trim() == a.as_str()),
+            Filter::Hidden => self.groups(|i| i.hidden),
             Filter::Apps => group_by_app(&self.items),
         }
     }
@@ -368,8 +378,8 @@ impl Store {
     pub fn add(&mut self, path: &Path, kind: Kind, thumb: &Frame, app: &str, secs: i64) -> rusqlite::Result<i64> {
         let (t, ord) = self.top();
         self.db.execute(
-            "INSERT INTO items(path,kind,created,ord,thumb,app,secs) VALUES(?,?,?,?,?,?,?)",
-            params![path.to_string_lossy(), kind as i64, t, ord, encode_png(thumb), app, secs],
+            "INSERT INTO items(path,kind,created,ord,thumb,app,secs,hidden) VALUES(?,?,?,?,?,?,?,?)",
+            params![path.to_string_lossy(), kind as i64, t, ord, encode_png(thumb), app, secs, kind == Kind::Shot && self.settings.save_only],
         )?;
         let id = self.db.last_insert_rowid();
         self.reload()?;
@@ -401,6 +411,24 @@ impl Store {
     pub fn thumb(&self, id: i64) -> Option<Frame> {
         let b: Vec<u8> = self.db.query_row("SELECT thumb FROM items WHERE id=?", [id], |r| r.get(0)).ok()?;
         decode_png(&b)
+    }
+
+    /// Change visibility without moving, deleting, or re-encoding any file.
+    pub fn set_hidden(&mut self, ids: &[i64], hidden: bool) -> rusqlite::Result<()> {
+        let tx = self.db.transaction()?;
+        {
+            let mut update = tx.prepare("UPDATE items SET hidden=? WHERE id=? AND kind=0")?;
+            for id in ids {
+                update.execute(params![hidden, id])?;
+            }
+        }
+        tx.commit()?;
+        for item in &mut self.items {
+            if item.kind == Kind::Shot && ids.contains(&item.id) {
+                item.hidden = hidden;
+            }
+        }
+        Ok(())
     }
 
     pub fn pin(&mut self, ids: &[i64], on: bool) {
@@ -508,7 +536,7 @@ mod tests {
     fn app_folders_include_unknown_and_follow_capture_recency() {
         let item = |id, app: &str, created, stack| Item {
             id, app: app.into(), created, stack, path: PathBuf::new(), kind: Kind::Shot,
-            pinned: false, ord: 0.0, secs: 0,
+            pinned: false, hidden: false, ord: 0.0, secs: 0,
         };
         let captures = [
             item(1, "Premiere Pro", 100, 7),
@@ -582,6 +610,50 @@ mod tests {
         assert_eq!(old_item.export_app(), "");
         assert_eq!(new_item.export_app(), "Explorer");
         assert!(legacy.is_file() && path.is_file());
+    }
+
+    #[test]
+    fn hidden_shots_keep_files_and_newer_shots_stay_visible() {
+        let temp = std::env::temp_dir().join(format!("ledge-hidden-{}-{}", std::process::id(), now_ms()));
+        let base = temp.join("shots");
+        let mut st = Store::open_at(&temp, base.clone()).unwrap();
+        let frame = Frame::new(2, 2);
+        let bytes = encode_png(&frame);
+        let add = |st: &mut Store, name: &str, kind: Kind| {
+            let path = base.join(name);
+            write_file(&path, &bytes).unwrap();
+            (st.add(&path, kind, &frame, "Explorer", 0).unwrap(), path)
+        };
+        std::fs::create_dir_all(&base).unwrap();
+        let (older, old_path) = add(&mut st, "older.png", Kind::Shot);
+        let (newer, new_path) = add(&mut st, "newer.png", Kind::Shot);
+        st.stack(&[older, newer], older);
+        st.set_hidden(&[older], true).unwrap();
+        assert_eq!(st.recent(), vec![vec![newer]]);
+        st.settings.save_only = true;
+        st.save_settings();
+        let (saved, saved_path) = add(&mut st, "saved.png", Kind::Shot);
+        let (clip, _) = add(&mut st, "clip.mp4", Kind::Clip);
+        st.set_hidden(&[clip], true).unwrap();
+        assert!(!st.get(clip).unwrap().hidden);
+        drop(st);
+
+        let mut st = Store::open_at(&temp, base).unwrap();
+        assert!(st.settings.save_only);
+        assert!(st.recent().iter().flatten().any(|id| *id == newer));
+        assert!(!st.recent().iter().flatten().any(|id| *id == older || *id == saved));
+        st.filter = Filter::Apps;
+        assert!(st.shelf().iter().flatten().all(|id| *id != older && *id != saved));
+        st.filter = Filter::Hidden;
+        assert_eq!(st.shelf(), vec![vec![saved], vec![older]]);
+        for p in [old_path, new_path, saved_path] {
+            assert_eq!(std::fs::read(p).unwrap(), bytes);
+        }
+        st.set_hidden(&[older], false).unwrap();
+        assert!(st.recent().iter().flatten().any(|id| *id == older));
+        assert_eq!(st.shelf(), vec![vec![saved]]);
+        drop(st);
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
