@@ -1,0 +1,9 @@
+// Cloudflare Worker that serves the landing page in site/ as static files.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ledge-grab",
+  "compatibility_date": "2026-11-26",
+  "assets": {
+    "directory": "./site"
+  }
+}

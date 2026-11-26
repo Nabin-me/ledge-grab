@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<defs>
+  <clipPath id="sq"><rect width="512" height="512" rx="116"/></clipPath>
+  <linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="512">
+    <stop offset="0" stop-color="#282a31"/>
+    <stop offset="0.46" stop-color="#131418"/>
+    <stop offset="1" stop-color="#070709"/>
+  </linearGradient>
+  <radialGradient id="keylight" gradientUnits="userSpaceOnUse" cx="256" cy="24" r="390">
+    <stop offset="0" stop-color="#cfe8ff" stop-opacity="0.085"/>
+    <stop offset="0.6" stop-color="#cfe8ff" stop-opacity="0.015"/>
+    <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="rim" gradientUnits="userSpaceOnUse" x1="256" y1="0" x2="256" y2="512">
+    <stop offset="0" stop-color="#ffffff" stop-opacity="0.28"/>
+    <stop offset="0.28" stop-color="#ffffff" stop-opacity="0.075"/>
+    <stop offset="0.75" stop-color="#ffffff" stop-opacity="0.015"/>
+    <stop offset="1" stop-color="#ffffff" stop-opacity="0.065"/>
+  </linearGradient>
+  <linearGradient id="ti" x1="0.16" y1="0" x2="0.84" y2="1">
+    <stop offset="0" stop-color="#fffdf9"/>
+    <stop offset="0.48" stop-color="#ede6d8"/>
+    <stop offset="1" stop-color="#bcb09a"/>
+  </linearGradient>
+  <linearGradient id="tiEdge" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#ffffff" stop-opacity="0.92"/>
+    <stop offset="0.4" stop-color="#ffffff" stop-opacity="0.16"/>
+    <stop offset="1" stop-color="#000000" stop-opacity="0.28"/>
+  </linearGradient>
+  <filter id="drop" filterUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+    <feDropShadow dx="0" dy="14" stdDeviation="13" flood-color="#000000" flood-opacity="0.55"/>
+    <feDropShadow dx="0" dy="3" stdDeviation="3.5" flood-color="#000000" flood-opacity="0.42"/>
+  </filter>
+  
+  <linearGradient id="sapphireGlass" x1="0.15" y1="0" x2="0.85" y2="1">
+    <stop offset="0" stop-color="#addfff" stop-opacity="0.94"/>
+    <stop offset="0.48" stop-color="#53a4f0" stop-opacity="0.74"/>
+    <stop offset="1" stop-color="#224c7a" stop-opacity="0.58"/>
+  </linearGradient>
+  <linearGradient id="sapphireRim" x1="0" y1="0" x2="0.8" y2="1">
+    <stop offset="0" stop-color="#f0f9ff" stop-opacity="0.96"/>
+    <stop offset="0.5" stop-color="#7ec6ff" stop-opacity="0.52"/>
+    <stop offset="1" stop-color="#3b82f6" stop-opacity="0.16"/>
+  </linearGradient>
+  <linearGradient id="notchFill" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#050608"/>
+    <stop offset="1" stop-color="#0b0d12"/>
+  </linearGradient>
+  <linearGradient id="notchLip" gradientUnits="userSpaceOnUse" x1="256" y1="26" x2="256" y2="75">
+    <stop offset="0" stop-color="#9ad4ff" stop-opacity="0"/>
+    <stop offset="0.6" stop-color="#9ad4ff" stop-opacity="0.18"/>
+    <stop offset="1" stop-color="#dff1ff" stop-opacity="0.45"/>
+  </linearGradient>
+  <linearGradient id="ledgeTop" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#ffffff"/>
+    <stop offset="0.22" stop-color="#f5efe3"/>
+    <stop offset="1" stop-color="#b4a790"/>
+  </linearGradient>
+</defs>
+<g clip-path="url(#sq)">
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <rect width="512" height="512" fill="url(#keylight)"/>
+  <rect x="6" y="6" width="500" height="500" rx="110" fill="none" stroke="#000000" stroke-opacity="0.48" stroke-width="3"/>
+</g>
+<g clip-path="url(#sq)">
+  <!-- Sculpted Obsidian Top Notch Overhang -->
+  <path d="M 132 3 A 20 20 0 0 1 152 23 L 152 52 A 22 22 0 0 0 174 74 L 338 74 A 22 22 0 0 0 360 52 L 360 23 A 20 20 0 0 1 380 3 Z" fill="url(#notchFill)"/>
+  <path d="M 152 26 L 152 52 A 22 22 0 0 0 174 74 L 338 74 A 22 22 0 0 0 360 52 L 360 26" fill="none" stroke="url(#notchLip)" stroke-width="1.8" stroke-linecap="round"/>
+
+  <!-- Rear Stacked Cool-Sapphire Optical Glass Card -->
+  <g filter="url(#drop)">
+    <path d="M 180.00 132.00 A 30.00 30.00 0 0 1 210.00 102.00 L 382.00 102.00 A 30.00 30.00 0 0 1 412.00 132.00 L 412.00 328.00 A 22.00 22.00 0 0 1 390.00 350.00 L 202.00 350.00 A 22.00 22.00 0 0 1 180.00 328.00 Z" fill="url(#sapphireGlass)"/>
+    <path d="M 180.00 132.00 A 30.00 30.00 0 0 1 210.00 102.00 L 382.00 102.00 A 30.00 30.00 0 0 1 412.00 132.00 L 412.00 328.00 A 22.00 22.00 0 0 1 390.00 350.00 L 202.00 350.00 A 22.00 22.00 0 0 1 180.00 328.00 Z" fill="none" stroke="url(#sapphireRim)" stroke-width="2.5"/>
+  </g>
+
+  <!-- Hero Front Warm-Titanium Capture Card -->
+  <g filter="url(#drop)">
+    <path d="M 102.00 186.00 A 30.00 30.00 0 0 1 132.00 156.00 L 314.00 156.00 A 30.00 30.00 0 0 1 344.00 186.00 L 344.00 328.00 A 22.00 22.00 0 0 1 322.00 350.00 L 124.00 350.00 A 22.00 22.00 0 0 1 102.00 328.00 Z" fill="#0c0e13"/>
+    <path fill-rule="evenodd" d="M 102.00 186.00 A 30.00 30.00 0 0 1 132.00 156.00 L 314.00 156.00 A 30.00 30.00 0 0 1 344.00 186.00 L 344.00 328.00 A 22.00 22.00 0 0 1 322.00 350.00 L 124.00 350.00 A 22.00 22.00 0 0 1 102.00 328.00 Z M 134.00 195.00 A 7.00 7.00 0 0 1 141.00 188.00 L 191.00 188.00 A 7.00 7.00 0 0 1 198.00 195.00 L 198.00 203.00 A 5.00 5.00 0 0 1 193.00 208.00 L 158.00 208.00 A 4.00 4.00 0 0 0 154.00 212.00 L 154.00 245.00 A 5.00 5.00 0 0 1 149.00 250.00 L 141.00 250.00 A 7.00 7.00 0 0 1 134.00 243.00 Z M 312.00 311.00 A 7.00 7.00 0 0 1 305.00 318.00 L 255.00 318.00 A 7.00 7.00 0 0 1 248.00 311.00 L 248.00 303.00 A 5.00 5.00 0 0 1 253.00 298.00 L 288.00 298.00 A 4.00 4.00 0 0 0 292.00 294.00 L 292.00 261.00 A 5.00 5.00 0 0 1 297.00 256.00 L 305.00 256.00 A 7.00 7.00 0 0 1 312.00 263.00 Z" fill="url(#ti)"/>
+    <path d="M 102.00 186.00 A 30.00 30.00 0 0 1 132.00 156.00 L 314.00 156.00 A 30.00 30.00 0 0 1 344.00 186.00 L 344.00 328.00 A 22.00 22.00 0 0 1 322.00 350.00 L 124.00 350.00 A 22.00 22.00 0 0 1 102.00 328.00 Z" fill="none" stroke="url(#tiEdge)" stroke-width="2.2"/>
+    <path d="M 134.00 195.00 A 7.00 7.00 0 0 1 141.00 188.00 L 191.00 188.00 A 7.00 7.00 0 0 1 198.00 195.00 L 198.00 203.00 A 5.00 5.00 0 0 1 193.00 208.00 L 158.00 208.00 A 4.00 4.00 0 0 0 154.00 212.00 L 154.00 245.00 A 5.00 5.00 0 0 1 149.00 250.00 L 141.00 250.00 A 7.00 7.00 0 0 1 134.00 243.00 Z M 312.00 311.00 A 7.00 7.00 0 0 1 305.00 318.00 L 255.00 318.00 A 7.00 7.00 0 0 1 248.00 311.00 L 248.00 303.00 A 5.00 5.00 0 0 1 253.00 298.00 L 288.00 298.00 A 4.00 4.00 0 0 0 292.00 294.00 L 292.00 261.00 A 5.00 5.00 0 0 1 297.00 256.00 L 305.00 256.00 A 7.00 7.00 0 0 1 312.00 263.00 Z" fill="none" stroke="#ffffff" stroke-opacity="0.32" stroke-width="1.2"/>
+  </g>
+
+  <!-- Cantilevered Warm-Titanium Architectural Ledge -->
+  <g filter="url(#drop)">
+    <path d="M 76.00 377.00 A 9.00 9.00 0 0 1 85.00 368.00 L 427.00 368.00 A 9.00 9.00 0 0 1 436.00 377.00 L 436.00 390.44 A 21.56 21.56 0 0 1 414.44 412.00 L 97.56 412.00 A 21.56 21.56 0 0 1 76.00 390.44 Z" fill="url(#ledgeTop)"/>
+    <path d="M 76.00 377.00 A 9.00 9.00 0 0 1 85.00 368.00 L 427.00 368.00 A 9.00 9.00 0 0 1 436.00 377.00 L 436.00 390.44 A 21.56 21.56 0 0 1 414.44 412.00 L 97.56 412.00 A 21.56 21.56 0 0 1 76.00 390.44 Z" fill="none" stroke="url(#tiEdge)" stroke-width="2"/>
+    <path d="M 88 370.5 L 424 370.5" stroke="#ffffff" stroke-opacity="0.9" stroke-width="2.2" stroke-linecap="round"/>
+  </g>
+</g>
+<rect x="2" y="2" width="508" height="508" rx="114" fill="none" stroke="url(#rim)" stroke-width="4"/>
+</svg>
