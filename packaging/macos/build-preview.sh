@@ -36,7 +36,7 @@ codesign --force --sign - "$APP"
 codesign --verify --strict "$APP"
 lipo -archs "$APP/Contents/MacOS/LedgeGrab"
 if [[ ${LEDGE_UNIVERSAL:-0} == 1 ]]; then
-    lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/LedgeGrab"
+    lipo "$APP/Contents/MacOS/LedgeGrab" -verify_arch arm64 x86_64
 fi
 ZIP="$OUT/Ledge-Grab-macOS-Preview.zip"
 rm -f "$ZIP"
