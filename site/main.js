@@ -119,14 +119,33 @@
     shots.slice(0, 3).forEach((s, i) => {
       const t = shotInTile(s, dims.tw, dims.th);
       t.style.setProperty("--i", i);
-      t.setAttribute("aria-label", `Preview copying shot ${i + 1}`);
+      t.setAttribute("aria-label", s.id ? `Copy your shot ${i + 1}` : `Preview copying shot ${i + 1}`);
       t.addEventListener("click", () => {
-        ledgeHint.textContent = "Copy preview · clipboard unchanged";
+        // Shots taken in the hero playground can be copied back into its clipboard.
+        if (s.id) document.dispatchEvent(new CustomEvent("ledgegrab:copy", { detail: { id: s.id } }));
+        ledgeHint.textContent = s.id ? "Copied · paste it in the chat with Ctrl+V" : "Copy preview · clipboard unchanged";
         clearTimeout(ledgeHintTimer);
-        ledgeHintTimer = setTimeout(() => { ledgeHint.textContent = "Recent shots demo"; }, 1800);
+        ledgeHintTimer = setTimeout(() => { ledgeHint.textContent = hintIdle(); }, 1800);
       });
       ledgeTiles.appendChild(t);
     });
+  }
+  const hintIdle = () => (visitorShots ? "Your shots from the playground" : "Recent shots demo");
+
+  // The badge in the notch: a thumbnail of the newest shot, the count, and a dot for "new".
+  const shelfThumb = $("#shelfThumb");
+  const shelfCount = $("#shelfCount");
+  let visitorShots = false, total = shots.length;
+  function renderBadge(fresh) {
+    shelfThumb.replaceChildren(shotInTile(shots[0], 22, 14).firstElementChild);
+    shelfCount.textContent = total;
+    shelfBtn.setAttribute("aria-label", `${total} recent ${total === 1 ? "shot" : "shots"}`);
+    if (fresh) {
+      nav.classList.add("fresh");
+      shelfCount.classList.remove("tick");
+      void shelfCount.offsetWidth;
+      shelfCount.classList.add("tick");
+    }
   }
 
   let openT, closeT;
@@ -136,10 +155,11 @@
     nav.classList.toggle("open", v);
     shelfBtn.setAttribute("aria-expanded", String(v));
     navPanel.inert = !v;
-    if (v) hideCaptureTab();
+    if (v) { hideCaptureTab(); nav.classList.remove("fresh"); }
   }
   sizeNotch();
   renderLedge();
+  renderBadge(false);
   onScroll();
 
   shelfBtn.addEventListener("pointerenter", (e) => {
@@ -186,6 +206,16 @@
       captureTabTimer = setTimeout(hideCaptureTab, 2400);
     }
   }
+
+  // Captures from the hero playground (site/demo) land here, so the visitor's own
+  // shots wait in the nav notch, like the app's ledge at the top of the screen.
+  // Without the playground this listener never fires.
+  document.addEventListener("ledgegrab:capture", (e) => {
+    if (!visitorShots) { visitorShots = true; shots.length = 0; total = 0; ledgeHint.textContent = hintIdle(); }
+    total += 1;
+    landOnLedge(e.detail);
+    renderBadge(true);
+  });
 
   // ───────── Hero: opt-in capture demo ─────────
   const stage = $("#stage");
@@ -266,7 +296,7 @@
 
   const captureOrder = ["open", "row", "cards", "head"];
   let nextCapture = 0, capturing = false;
-  captureDemo.addEventListener("click", async () => {
+  captureDemo?.addEventListener("click", async () => {
     if (capturing) return;
     capturing = true;
     captureDemo.setAttribute("aria-busy", "true");
