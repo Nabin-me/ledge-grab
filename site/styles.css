@@ -74,7 +74,8 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 /* ───────── Header navigation ───────── */
 .nav {
   --bar-w: min(var(--wrap), calc(100% - 48px));
-  position: absolute; inset: 0 0 auto; z-index: 60; height: 0; pointer-events: none;
+  position: fixed; inset: 0 0 auto; z-index: 60; height: 58px; pointer-events: none;
+  background: linear-gradient(180deg, rgba(7,7,9,.96), rgba(7,7,9,.85) 75%, rgba(7,7,9,0));
 }
 .nav-row {
   position: absolute; top: 0; left: 0; right: 0; margin-inline: auto;
