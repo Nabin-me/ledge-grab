@@ -25,7 +25,7 @@ if (mount && off) {
     started = true;
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("./tryit.css?v=4", import.meta.url).href;
+    link.href = new URL("./tryit.css?v=5", import.meta.url).href;
     const cssReady = new Promise((done, fail) => {
       link.onload = done;
       link.onerror = fail;
