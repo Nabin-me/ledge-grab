@@ -1,0 +1,18 @@
+[Desktop Entry]
+Name=Ledge Grab Preview
+Comment=Capture, copy, and revisit screenshots
+Exec=ledge-grab-linux
+Icon=app.ledgegrab.Preview
+Terminal=false
+Type=Application
+Categories=Graphics;
+StartupNotify=true
+Actions=CaptureArea;CaptureScreen;
+
+[Desktop Action CaptureArea]
+Name=Capture Area
+Exec=ledge-grab-linux --capture area
+
+[Desktop Action CaptureScreen]
+Name=Capture Screen
+Exec=ledge-grab-linux --capture screen
