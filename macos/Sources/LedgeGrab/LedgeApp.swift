@@ -73,7 +73,7 @@ final class LedgeApp: NSObject, NSApplicationDelegate {
             alert.addButton(withTitle: "Open System Settings")
             alert.addButton(withTitle: "Not now")
             NSApp.activate(ignoringOtherApps: true)
-            if alert.runModal() == .alertFirstButton,
+            if alert.runModal() == .alertFirstButtonReturn,
                let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
                 NSWorkspace.shared.open(url)
             }
