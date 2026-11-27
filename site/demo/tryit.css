@@ -342,5 +342,8 @@
   .ti-tools { padding-top: 30px; }
   .ti-tools button { min-width: 30px; height: 30px; padding: 0 6px; }
   .ti-tools .ti-copy span { display: none; }
-  .ti-qlist { left: 0; right: auto; transform-origin: 0 100%; width: min(320px, calc(100vw - 32px)); }
+  /* Anchor the popover to the full-width bar, not its narrow button. */
+  .ti-bar { position: relative; }
+  .ti-quests { position: static; }
+  .ti-qlist { right: 0; width: min(320px, 100%); }
 }
