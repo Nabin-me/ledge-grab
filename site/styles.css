@@ -113,8 +113,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 }
 .nav.docked .nav-row .brand { justify-self: center; min-width: 44px; justify-content: center; gap: 0; }
 .nav.docked .nav-row .brand-name { max-width: 0; opacity: 0; }
-.nav-row #navDl { justify-self: end; align-self: center; }
-.nav.docked .nav-row #navDl { margin-right: 6px; padding-inline: 10px; }
 .shelf-btn {
   justify-self: center; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
   width: 88px; height: 44px; border-radius: 999px;
@@ -607,7 +605,6 @@ footer nav a:hover { color: var(--ink); }
   .nav { --bar-w: calc(100% - 30px); }
   .nav-row .brand { font-size: 14px; gap: 5px; }
   .nav-row .brand img { width: 22px; height: 22px; }
-  .nav-row #navDl { padding-inline: 12px; font-size: 13px; }
   .hero { padding-top: 102px; }
   .capture-controls { margin-top: 30px; }
   .shelf-grid { grid-template-columns: repeat(2, 1fr); }
@@ -630,7 +627,6 @@ footer nav a:hover { color: var(--ink); }
 
 @media (max-width: 360px) {
   .nav-row .brand-name { max-width: 67px; }
-  .nav-row #navDl { padding-inline: 9px; }
   .shelf-demo-label { display: none; }
   .hero .cta-row { gap: 8px; }
   .hero .cta-row .btn { padding-inline: 12px; }
