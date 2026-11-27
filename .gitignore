@@ -1,3 +1,8 @@
 /target
 /dist
 __pycache__/
+
+# macOS SwiftPM and local preview bundle
+/macos/.build/
+/macos/.swiftpm/
+/macos/dist/

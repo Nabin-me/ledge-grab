@@ -1,0 +1,36 @@
+name: macOS Preview
+
+on:
+  push:
+    branches: [main, 'birdyy/macos-preview']
+    paths: ['macos/**', 'packaging/macos/**', 'assets/brand/ledge-grab.png', '.github/workflows/macos-preview.yml']
+  pull_request:
+    branches: [main]
+    paths: ['macos/**', 'packaging/macos/**', 'assets/brand/ledge-grab.png', '.github/workflows/macos-preview.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test capture geometry and storage
+        run: swift test --package-path macos
+      - name: Package universal app
+        run: LEDGE_UNIVERSAL=1 bash packaging/macos/build-preview.sh "${{ runner.temp }}/ledge-preview"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ledge-Grab-macOS-Preview
+          path: |
+            ${{ runner.temp }}/ledge-preview/Ledge-Grab-macOS-Preview.zip
+            ${{ runner.temp }}/ledge-preview/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
