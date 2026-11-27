@@ -6,7 +6,8 @@
   <meta name="theme-color" content="#070709">
   <link rel="icon" href="assets/ledge-grab.svg" type="image/svg+xml">
   <link rel="preload" href="assets/InterTight.ttf" as="font" type="font/ttf" crossorigin>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20261126d">
+  <style>/* try-capture demo: reserves the playground box */ #tryit{width:min(1180px,calc(100% - 32px));margin:56px auto 0;aspect-ratio:1180/660}@media (max-width:860px){#tryit{aspect-ratio:auto;height:940px}}</style>
   <!-- Ledge Grab SEO: begin -->
   <title>Ledge Grab | Free Screenshot Tool for Windows</title>
   <meta name="description" content="Free, open-source screenshot tool for Windows 10 and 11. Capture, mark up and blur sensitive text, then copy or drag recent shots from your screen’s ledge.">
@@ -58,15 +59,16 @@
     <div class="nav-notch" aria-hidden="true"></div>
     <div class="capture-tab" id="captureTab" aria-hidden="true">
       <span class="capture-thumb" id="captureThumb"></span>
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 10 3 3 7-7"/></svg>
+      <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 10 3 3 7-7"/></svg>
     </div>
     <span class="capture-status" id="captureStatus" role="status"></span>
     <div class="nav-row" id="navRow">
       <a href="#" class="brand" aria-label="Ledge Grab home"><img src="assets/mark-light.svg" alt=""><span class="brand-name">Ledge Grab</span></a>
-      <button class="shelf-btn" id="shelfBtn" type="button" aria-label="Recent shots demo" aria-controls="navPanel" aria-expanded="false">
-        <svg class="notch-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="7.5" width="13" height="10" rx="2.5"/><path d="M8 7.5v-1a2.5 2.5 0 0 1 2.5-2.5h7a2.5 2.5 0 0 1 2.5 2.5v6a2.5 2.5 0 0 1-2.5 2.5M8 14l2-2 2.5 2.5 1.5-1.5 1.5 1.5"/></svg>
-        <span>Recent</span>
-        <svg class="notch-chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 5 2.5 2.5L8.5 5"/></svg>
+      <button class="shelf-btn" id="shelfBtn" type="button" aria-label="3 recent shots" aria-controls="navPanel" aria-expanded="false">
+        <span class="shelf-thumb" id="shelfThumb" aria-hidden="true"></span>
+        <span class="shelf-count" id="shelfCount">3</span>
+        <span class="shelf-dot" aria-hidden="true"></span>
+        <svg class="notch-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 5 2.5 2.5L8.5 5"/></svg>
       </button>
       <a href="#download" class="btn sm" id="navDl">Download</a>
     </div>
@@ -100,11 +102,9 @@
         <div class="meta-row fade-up" style="--d:1s"><span>Works offline</span><span>Built in Rust</span><span>Open source</span></div>
       </div>
 
-      <div class="capture-controls">
-        <button class="btn ghost sm" id="captureDemo" type="button">Try a capture</button>
-        <div class="keys" id="heroKeys" aria-label="Windows app shortcut: Control, Shift, S"><kbd class="kbd">Ctrl</kbd><span class="plus" aria-hidden="true">+</span><kbd class="kbd">Shift</kbd><span class="plus" aria-hidden="true">+</span><kbd class="kbd">S</kbd></div>
-      </div>
-
+      <!-- try-capture demo: the hands-on playground. Remove: replace this div and the template with the template's contents. -->
+      <div id="tryit" aria-label="Ledge Grab playground"></div>
+      <template id="tryitFallback">
       <div class="stage-wrap">
         <div class="stage-glow"></div>
         <div class="stage" id="stage">
@@ -145,6 +145,7 @@
           <div class="flash" id="flash"></div>
         </div>
       </div>
+      </template>
       <div class="scroll-cue" aria-hidden="true"></div>
     </section>
 
@@ -285,6 +286,7 @@
     </div>
   </footer>
 
-  <script src="main.js"></script>
+  <script src="main.js?v=20261126d"></script>
+  <script type="module" src="demo/tryit.js"></script><!-- try-capture demo -->
 </body>
 </html>
