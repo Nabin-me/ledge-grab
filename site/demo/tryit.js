@@ -31,7 +31,7 @@ if (mount && off) {
       link.onerror = fail;
     });
     document.head.append(link);
-    Promise.all([import("./tryit-app.js?v=4"), cssReady])
+    Promise.all([import("./tryit-app.js?v=5"), cssReady])
       .then(([app]) => app.mount(mount))
       .catch(restore);
   };

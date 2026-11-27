@@ -17,22 +17,10 @@ app works:
 | Float | Float on a shot; drag, scroll to resize, `Ctrl`+scroll to fade, right-click closes | Float above windows |
 | Merge | Tick two shots, press Merge | Merge into a PDF |
 
-## The page's nav notch
+## Keep captures inside the playground
 
-Each capture also goes up to the page's own notch, the way the app parks shots at
-the top of the screen:
-
-- The playground fires `ledgegrab:capture` (`{ id, node, w, h }`). `main.js`
-  listens, swaps the placeholder art for the visitor's shots, and shows the
-  confirmation tab under the nav.
-- The nav badge is a tiny stacked thumbnail of the newest shot, the count, and a
-  blue dot until the notch is opened. It replaced the "Recent" label.
-- Clicking a shot in the nav notch fires `ledgegrab:copy` (`{ id }`) back, so that
-  shot goes on the playground clipboard, ready for `Ctrl`+`V` in the chat.
-
-Without the playground, neither event fires and the nav keeps its placeholder
-shots. The badge and the listener live in `main.js` and `styles.css`, so they stay
-if the playground is removed.
+The demo's own notch shows captures and copies them to the playground clipboard.
+The page navigation has no separate Recent Shots notch or capture overlay.
 
 A "Things to try" counter (0 of 7) tracks what the visitor has discovered and the
 status line always names the next thing to try. The chat replies react to what was
@@ -58,7 +46,7 @@ All tagged `try-capture demo`:
 2. In the hero: `<div id="tryit">` followed by `<template id="tryitFallback">`,
    which holds the original hero stage.
 3. `<script type="module" src="demo/tryit.js">` before `</body>`.
-4. `main.js` uses `captureDemo?.addEventListener`, because the old hero button is gone.
+4. The playground owns its own capture interactions; main.js has no capture listener for it.
 
 ## Turn it off or remove it
 

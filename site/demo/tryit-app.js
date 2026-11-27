@@ -541,9 +541,7 @@ export function mount(root) {
     fly.remove();
 
     shots.unshift(shot);
-    known.set(shot.id, shot);
     renderLedge();
-    toNav(shot);
     play(notch, [{ transform: "scale(1)" }, { transform: "scale(1.08, 1.25)", offset: 0.35 }, { transform: "scale(1)" }], { duration: 480, easing: STD, fill: "none" });
     quest("capture");
     say(nextHint());
@@ -645,25 +643,6 @@ export function mount(root) {
     toast("Copied. Press Ctrl+V in the chat.");
     say(nextHint());
   }
-
-  // ── the page's nav notch ──────────────────────────────
-  // Each capture is also offered to the page's own notch (main.js listens for
-  // "ledgegrab:capture"), so the visitor's shots wait at the top of the screen.
-  // Clicking one there sends "ledgegrab:copy" back to put it on our clipboard.
-  const known = new Map();
-  function toNav(shot) {
-    const { r } = shot;
-    const node = document.createElement("div");
-    node.style.cssText = `width:${r.w}px;height:${r.h}px;overflow:hidden;background:#fbfaf7`;
-    const c = shot.master.cloneNode(true);
-    c.style.cssText = `inset:auto;left:${-r.x}px;top:${-r.y}px;width:${shot.dw}px;height:${shot.dh}px`;
-    node.append(c);
-    document.dispatchEvent(new CustomEvent("ledgegrab:capture", { detail: { id: shot.id, node, w: r.w, h: r.h } }));
-  }
-  document.addEventListener("ledgegrab:copy", (e) => {
-    const shot = known.get(e.detail?.id);
-    if (shot) copyShot(shot);
-  });
 
   nbar.addEventListener("click", () => setOpen(!notch.classList.contains("open")));
   notch.addEventListener("pointerenter", () => {
