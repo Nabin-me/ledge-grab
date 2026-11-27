@@ -4,6 +4,10 @@ import XCTest
 @testable import LedgeCaptureCore
 
 final class CaptureCoreTests: XCTestCase {
+    private func canonicalPaths(_ urls: [URL]) -> [String] {
+        urls.map { $0.resolvingSymlinksInPath().path }
+    }
+
     func testRetinaCropRespectsTopLeftOriginAndRoundsOut() {
         let canvas = CGRect(x: 0, y: 0, width: 100, height: 80)
         let pixelSize = CGSize(width: 200, height: 160)
@@ -41,8 +45,8 @@ final class CaptureCoreTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: directory.appendingPathComponent(newer.lastPathComponent),
                                                    withDestinationURL: newer)
         XCTAssertEqual(try Data(contentsOf: newer), Data([2]))
-        XCTAssertEqual(CaptureStore(directory: directory).recent(), [newer, older])
-        XCTAssertEqual(store.recent(limit: 1), [newer])
+        XCTAssertEqual(canonicalPaths(CaptureStore(directory: directory).recent()), canonicalPaths([newer, older]))
+        XCTAssertEqual(canonicalPaths(store.recent(limit: 1)), canonicalPaths([newer]))
         XCTAssertTrue(store.recent(limit: 0).isEmpty)
     }
 
@@ -54,6 +58,6 @@ final class CaptureCoreTests: XCTestCase {
         let one = try store.savePNG(Data([1]), at: instant)
         let two = try store.savePNG(Data([2]), at: instant)
         XCTAssertNotEqual(one, two)
-        XCTAssertEqual(Set(store.recent()), Set([one, two]))
+        XCTAssertEqual(Set(canonicalPaths(store.recent())), Set(canonicalPaths([one, two])))
     }
 }
