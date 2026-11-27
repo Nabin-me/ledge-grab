@@ -53,12 +53,6 @@
     chart: `<div class="art art-chart"><small>Quarter in review</small><div class="bars">${[22, 30, 34, 44, 40, 58, 62, 72, 92, 84]
       .map((h, i) => `<i style="height:${h}%"${i === 8 ? ' class="hi"' : ""}></i>`).join("")}</div></div>`,
   };
-  const tileEl = (inner, cls = "") => {
-    const t = document.createElement("div");
-    t.className = "tile " + cls;
-    t.innerHTML = inner;
-    return t;
-  };
 
   // ───────── Hero title: word-by-word blur rise ─────────
   {
@@ -74,69 +68,40 @@
       .join("");
   }
 
-  // ───────── Nav: plain bar at the top, docks into the notch on scroll ─────────
+  // ───────── Nav: full bar at the top, compact notch on scroll ─────────
   const nav = $("#nav");
-  const navRow = $("#navRow");
-  const navNotch = $("#navNotch");
+  const navPanel = $("#navPanel");
   const shelfBtn = $("#shelfBtn");
   const ledgeTiles = $("#ledgeTiles");
-  const ledgeCount = $("#ledgeCount");
+  const ledgeHint = $("#ledgeHint");
+  let ledgeHintTimer;
+  const captureTab = $("#captureTab");
+  const captureThumb = $("#captureThumb");
+  const captureStatus = $("#captureStatus");
   const shots = [{ art: "chart" }, { art: "clock" }, { art: "pal" }];
-  let total = 3, docked = false, isOpen = false;
-  const ROW_H = 48;
-  const flipEls = () => [$(".brand img"), ...$$(".links a"), $("#navDl")];
-
-  function panelDims() {
-    const rowW = navRow.offsetWidth;
-    const ow = Math.max(rowW, Math.min(612, innerWidth - 36));
-    const bw = ow - 32;
-    const tw = (bw - 20) / 3;
-    return { rowW, ow, bw, tw, th: tw / 1.6, oh: 54 + tw / 1.6 + 12 + 44 + 12 };
-  }
-  let dims;
+  let isOpen = false, docked = false, dims, captureTabTimer;
   function sizeNotch() {
-    if (!docked) {
-      // Keep the panel at its docked size so it never stretches to the full bar.
-      const ow = Math.min(612, innerWidth - 36), tw = (ow - 52) / 3;
-      dims = { ow, bw: ow - 32, tw, th: tw / 1.6 };
-      nav.style.setProperty("--bw", dims.bw + "px");
-      return;
-    }
-    dims = panelDims();
-    nav.style.setProperty("--bw", dims.bw + "px");
-    nav.style.setProperty("--nw", (isOpen ? dims.ow : dims.rowW) + "px");
-    nav.style.setProperty("--nh", (isOpen ? dims.oh : ROW_H) + "px");
+    const ow = Math.min(520, innerWidth - 28);
+    const bw = ow - 28;
+    const tw = (bw - 20) / 3;
+    dims = { ow, bw, tw, th: tw / 1.6 };
+    nav.style.setProperty("--bw", bw + "px");
+    nav.style.setProperty("--open-w", ow + "px");
+    nav.style.setProperty("--open-h", (54 + dims.th + 7 + 44 + 13) + "px");
   }
-
-  function setDocked(v) {
-    if (v === docked) return;
-    const els = flipEls();
-    const first = els.map((e) => e.getBoundingClientRect());
-    docked = v;
-    if (!v) setOpen(false);
-    nav.classList.toggle("docked", v);
-    sizeNotch();
-    const cx0 = innerWidth / 2;
-    els.forEach((e) => {
-      const a = first.shift(), b = e.getBoundingClientRect();
-      if (!b.width) return;
-      const dx = a.left - b.left, dy = a.top - b.top;
-      const sx = a.width / b.width || 1;
-      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
-      // Items nearest the centre move first when docking, last when leaving.
-      const dist = Math.min(1, Math.abs(a.left + a.width / 2 - cx0) / cx0);
-      e.animate(
-        [{ transform: `translate(${dx}px,${dy}px) scale(${sx})`, transformOrigin: "0 0" }, { transform: "none", transformOrigin: "0 0" }],
-        { duration: v ? 820 : 620, delay: v ? dist * 90 : (1 - dist) * 60, easing: v ? SPRING : EMPH, fill: "backwards" }
-      );
-    });
-  }
-  const onScroll = () => setDocked(scrollY > 90);
-  addEventListener("scroll", onScroll, { passive: true });
   addEventListener("resize", () => { sizeNotch(); renderLedge(); });
+  const onScroll = () => {
+    const next = docked ? scrollY > 52 : scrollY > 104;
+    if (next === docked) return;
+    docked = next;
+    nav.classList.toggle("docked", docked);
+  };
+  addEventListener("scroll", onScroll, { passive: true });
 
   function shotInTile(shot, tw, th) {
-    const t = tileEl("");
+    const t = document.createElement("button");
+    t.type = "button";
+    t.className = "tile";
     if (shot.art) { t.innerHTML = ART[shot.art]; return t; }
     const clip = document.createElement("div");
     clip.className = "shotclip";
@@ -154,12 +119,11 @@
     shots.slice(0, 3).forEach((s, i) => {
       const t = shotInTile(s, dims.tw, dims.th);
       t.style.setProperty("--i", i);
+      t.setAttribute("aria-label", `Preview copying shot ${i + 1}`);
       t.addEventListener("click", () => {
-        const c = document.createElement("div");
-        c.className = "copied";
-        c.textContent = "Copied";
-        t.appendChild(c);
-        setTimeout(() => c.remove(), 1150);
+        ledgeHint.textContent = "Copy preview · clipboard unchanged";
+        clearTimeout(ledgeHintTimer);
+        ledgeHintTimer = setTimeout(() => { ledgeHint.textContent = "Recent shots demo"; }, 1800);
       });
       ledgeTiles.appendChild(t);
     });
@@ -167,12 +131,12 @@
 
   let openT, closeT;
   function setOpen(v) {
-    if (v && !docked) return;
     if (v === isOpen) return;
     isOpen = v;
     nav.classList.toggle("open", v);
-    if (v) nav.classList.remove("fresh");
-    sizeNotch();
+    shelfBtn.setAttribute("aria-expanded", String(v));
+    navPanel.inert = !v;
+    if (v) hideCaptureTab();
   }
   sizeNotch();
   renderLedge();
@@ -183,35 +147,47 @@
     clearTimeout(closeT);
     openT = setTimeout(() => setOpen(true), 110);
   });
-  shelfBtn.addEventListener("click", () => setOpen(!isOpen));
+  shelfBtn.addEventListener("click", () => {
+    clearTimeout(openT);
+    setOpen(!isOpen);
+  });
   nav.addEventListener("pointerenter", () => clearTimeout(closeT));
   nav.addEventListener("pointerleave", (e) => {
     if (e.pointerType === "touch") return;
     clearTimeout(openT);
-    closeT = setTimeout(() => setOpen(false), 380);
+    closeT = setTimeout(() => {
+      if (!navPanel.contains(document.activeElement)) setOpen(false);
+    }, 380);
   });
-  $("#ledgeClose").addEventListener("click", () => setOpen(false));
+  $("#ledgeClose").addEventListener("click", () => { shelfBtn.focus(); setOpen(false); });
   document.addEventListener("pointerdown", (e) => { if (!nav.contains(e.target)) setOpen(false); });
-  addEventListener("keydown", (e) => { if (e.key === "Escape") setOpen(false); });
+  addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !isOpen) return;
+    if (navPanel.contains(document.activeElement)) shelfBtn.focus();
+    setOpen(false);
+  });
 
+  function hideCaptureTab() {
+    clearTimeout(captureTabTimer);
+    captureTab.classList.remove("on");
+    nav.classList.remove("capture-on");
+    captureStatus.textContent = "";
+  }
   function landOnLedge(shot) {
     shots.unshift(shot);
-    shots.length = Math.min(shots.length, 6);
-    total++;
-    ledgeCount.textContent = total;
-    ledgeCount.classList.remove("tick");
-    void ledgeCount.offsetWidth;
-    ledgeCount.classList.add("tick");
-    navNotch.animate(
-      [{ transform: "translate(-50%,0) scale(1,1)" }, { transform: "translate(-50%,0) scale(1.04,1.12)", offset: 0.3 }, { transform: "translate(-50%,0) scale(1,1)" }],
-      { duration: 620, easing: SPRING }
-    );
-    shelfBtn.animate([{ transform: "scale(1)" }, { transform: "scale(1.12)", offset: 0.3 }, { transform: "scale(1)" }], { duration: 600, easing: SPRING });
-    if (!isOpen) nav.classList.add("fresh");
+    shots.length = Math.min(shots.length, 3);
     renderLedge();
+    hideCaptureTab();
+    if (!isOpen) {
+      captureThumb.replaceChildren(shotInTile(shot, 23, 14).firstElementChild);
+      captureStatus.textContent = "Demo shot captured";
+      captureTab.classList.add("on");
+      nav.classList.add("capture-on");
+      captureTabTimer = setTimeout(hideCaptureTab, 2400);
+    }
   }
 
-  // ───────── Hero: a live capture, flying up to the ledge ─────────
+  // ───────── Hero: opt-in capture demo ─────────
   const stage = $("#stage");
   const win = $("#win");
   const sel = $("#sel");
@@ -219,11 +195,9 @@
   const cursor = $("#cursor");
   const toolbar = $("#toolbar");
   const flash = $("#flash");
-  const flyLayer = $("#flyLayer");
+  const captureDemo = $("#captureDemo");
   const heroKeys = $$("#heroKeys .kbd");
 
-  let heroVisible = false;
-  new IntersectionObserver(([e]) => (heroVisible = e.intersectionRatio >= 0.55), { threshold: [0, 0.55, 0.8] }).observe(stage);
   const until = async (fn) => { while (!fn()) await sleep(200); };
 
   let cx = 0, cy = 0;
@@ -258,51 +232,20 @@
     heroKeys.forEach((k) => k.classList.remove("down"));
   }
 
-  async function fly(shot, rect) {
-    const s = stage.getBoundingClientRect();
-    const sx = s.left + rect.x, sy = s.top + rect.y;
-    const el = document.createElement("div");
-    el.className = "fly";
-    el.style.width = shot.w + "px";
-    el.style.height = shot.h + "px";
-    el.appendChild(shot.node.cloneNode(true));
-    flyLayer.appendChild(el);
-    const L = shelfBtn.getBoundingClientRect();
-    const k = 22 / shot.w;
-    const tx = L.left + L.width / 2 - (shot.w * k) / 2;
-    const ty = L.top + L.height / 2 - (shot.h * k) / 2;
-    const midX = lerp(sx, tx, 0.55) + (tx > sx ? -40 : 40);
-    const midY = lerp(sy, ty, 0.45) - 10;
-    const a = el.animate(
-      [
-        { transform: `translate(${sx}px,${sy}px) scale(1)`, opacity: 1, borderRadius: "4px", easing: SPRING },
-        { offset: 0.2, transform: `translate(${sx}px,${sy - 8}px) scale(1.035)`, opacity: 1, easing: "cubic-bezier(.5,0,.75,.2)" },
-        { offset: 0.62, transform: `translate(${midX}px,${midY}px) scale(${lerp(1, k, 0.6)})`, opacity: 1, easing: EMPH },
-        { offset: 0.9, transform: `translate(${tx}px,${ty}px) scale(${k})`, opacity: 1, borderRadius: "40px" },
-        { transform: `translate(${tx}px,${ty + 2}px) scale(${k * 0.6})`, opacity: 0, borderRadius: "40px" },
-      ],
-      { duration: 1250, fill: "forwards" }
-    );
-    setTimeout(() => landOnLedge(shot), 1050);
-    await a.finished;
-    el.remove();
-  }
-
   async function capture(key) {
     const st = stage.getBoundingClientRect();
     const r = regionRect(key);
+    if (reduced) { landOnLedge(makeShot(r)); return; }
     cursor.classList.add("on");
     cursor.classList.remove("x");
     if (!cx) placeCursor(st.width * 0.78, st.height * 0.86);
-    await sleep(350);
-    await pressHeroKeys();
+    pressHeroKeys();
     toolbar.classList.add("on");
     cursor.classList.add("x");
-    await moveCursor(r.x, r.y, 800);
-    await sleep(140);
+    await moveCursor(r.x, r.y, 420);
     sel.classList.add("on");
     const scale = 2560 / st.width;
-    await tween(820, ease.std, (t) => {
+    await tween(520, ease.std, (t) => {
       const w = r.w * t, h = r.h * t;
       sel.style.transform = `translate(${r.x}px,${r.y}px)`;
       sel.style.width = w + "px";
@@ -310,27 +253,27 @@
       selDim.textContent = `${Math.round(w * scale)} × ${Math.round(h * scale)}`;
       placeCursor(r.x + w, r.y + h);
     });
-    await sleep(380);
+    await sleep(130);
     // Release: grab the frame
-    flash.animate([{ opacity: 0 }, { opacity: 0.5, offset: 0.25 }, { opacity: 0 }], { duration: 320, easing: STD });
+    flash.animate([{ opacity: 0 }, { opacity: 0.13, offset: 0.25 }, { opacity: 0 }], { duration: 220, easing: STD });
     const shot = makeShot(r);
     sel.classList.remove("on");
     toolbar.classList.remove("on");
     cursor.classList.remove("x");
-    fly(shot, r);
-    await sleep(500);
-    await moveCursor(st.width * (0.62 + Math.random() * 0.2), st.height * (0.8 + Math.random() * 0.1), 900);
-    await sleep(1700);
+    landOnLedge(shot);
+    cursor.classList.remove("on");
   }
 
-  (async () => {
-    if (reduced) return;
-    const order = ["open", "row", "cards", "head"];
-    for (let i = 0; ; i++) {
-      await until(() => heroVisible && docked && !document.hidden);
-      await capture(order[i % order.length]);
-    }
-  })();
+  const captureOrder = ["open", "row", "cards", "head"];
+  let nextCapture = 0, capturing = false;
+  captureDemo.addEventListener("click", async () => {
+    if (capturing) return;
+    capturing = true;
+    captureDemo.setAttribute("aria-busy", "true");
+    setOpen(false);
+    try { await capture(captureOrder[nextCapture++ % captureOrder.length]); }
+    finally { capturing = false; captureDemo.removeAttribute("aria-busy"); }
+  });
 
   // ───────── Scroll reveals ─────────
   const revealIO = new IntersectionObserver(
@@ -371,7 +314,11 @@
   const shStatus = $("#shStatus");
   const toast = $("#toast");
   const START = ["inv", "pal", "clock", "map", "chat", "poster", "code", "chart"];
-  let items = [], picked = [], lastClick = -1, uid = 0;
+  const folderArt = `<div class="art folder-art"><svg aria-hidden="true" viewBox="0 0 48 36" fill="none"><path d="M2 9a4 4 0 0 1 4-4h13l5 5h18a4 4 0 0 1 4 4v15a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4z" fill="#363640"/><path d="M4 14h40v15a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="#15161a"/><path d="M5 14h38" stroke="#b7ad9c" stroke-width="1.5"/></svg></div>`;
+  const filterLabels = { clip: "Clips", folder: "App folders", hidden: "Hidden shots" };
+  let items = [], picked = [], lastClick = -1, uid = 0, shelfFilter = "all";
+  const visibleItems = () => items.filter((it) => shelfFilter === "all" ? !it.hidden && !it.folder
+    : shelfFilter === "clip" ? it.clip : shelfFilter === "folder" ? it.folder : it.hidden);
   let toastT;
   const showToast = (msg) => {
     toast.textContent = msg;
@@ -391,7 +338,12 @@
     });
   };
   function shelfTile(it, enterIdx) {
-    const t = tileEl(ART[it.art] + (it.pdf ? `<div class="pdfov">PDF</div>` : "") + `<span class="tick"></span>` + (it.pin ? pinBadge : ""));
+    const t = document.createElement("button");
+    t.type = "button";
+    t.className = "tile";
+    t.disabled = shelfFilter !== "all";
+    t.innerHTML = (it.folder ? folderArt : ART[it.art]) + (it.pdf ? `<div class="pdfov">PDF</div>` : it.clip ? `<div class="pdfov">MP4</div>` : "") + `<span class="tick"></span>` + (it.pin ? pinBadge : "");
+    t.setAttribute("aria-label", it.folder ? "Example app folder" : it.pdf ? "Example merged PDF" : it.clip ? "Example clip" : "Example screenshot " + it.id.slice(1));
     t.dataset.id = it.id;
     if (enterIdx != null) { t.classList.add("enter"); t.style.setProperty("--i", enterIdx); }
     return t;
@@ -399,36 +351,53 @@
   const pinBadge = `<span class="pinb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 17v5M6 10l1-6h10l1 6-3 3H9z"/></svg></span>`;
   function renderShelf(enter = false) {
     grid.innerHTML = "";
-    items.forEach((it, i) => grid.appendChild(shelfTile(it, enter ? i : null)));
+    const shown = visibleItems();
+    shown.forEach((it, i) => grid.appendChild(shelfTile(it, enter ? i : null)));
+    if (!shown.length) { const p = document.createElement("p"); p.className = "shelf-empty"; p.textContent = shelfFilter === "all" ? "No demo shots" : "No " + filterLabels[shelfFilter].toLowerCase(); grid.appendChild(p); }
     syncPicks();
   }
   function syncPicks() {
     $$(".tile", grid).forEach((t) => {
       const n = picked.indexOf(t.dataset.id);
       t.classList.toggle("sel", n >= 0);
+      t.setAttribute("aria-pressed", String(n >= 0));
       t.querySelector(".tick").textContent = n >= 0 ? n + 1 : "";
     });
     grid.classList.toggle("picking", picked.length > 0);
-    shMerge.classList.toggle("dim", picked.length < 2);
-    shStatus.innerHTML = picked.length === 0
-      ? "Tick two or more shots, then press the arrow"
-      : picked.length === 1 ? "<b>1</b> selected. Tick one more to merge"
-      : `<b>${picked.length}</b> selected. Press the arrow to merge them into a PDF`;
+    const readOnly = shelfFilter !== "all";
+    ["#shCopy", "#shPin", "#shDel"].forEach((selector) => { $(selector).disabled = readOnly; });
+    shMerge.disabled = picked.length < 2 || readOnly;
+    shMerge.classList.toggle("dim", shMerge.disabled);
+    shStatus.textContent = shelfFilter !== "all" ? filterLabels[shelfFilter] + " preview"
+      : picked.length === 0 ? "Select shots to make a PDF."
+      : picked.length === 1 ? "Select one more shot."
+      : `${picked.length} selected`;
+  }
+  function updateTabs() {
+    $$("#shelfTabs button").forEach((b) => {
+      const active = b.dataset.filter === shelfFilter;
+      b.classList.toggle("on", active);
+      b.setAttribute("aria-pressed", String(active));
+    });
   }
   function resetShelf() {
-    items = START.map((art) => ({ id: "s" + uid++, art }));
-    picked = [];
+    items = START.map((art, i) => ({ id: "s" + uid++, art, clip: i === 4 || i === 5 }));
+    items.push({ id: "s" + uid++, art: "pal", folder: true }, { id: "s" + uid++, art: "map", folder: true }, { id: "s" + uid++, art: "code", hidden: true });
+    shelfFilter = "all";
+    picked = []; lastClick = -1;
+    updateTabs();
     renderShelf(true);
   }
   resetShelf();
   grid.addEventListener("click", (e) => {
     const t = e.target.closest(".tile");
-    if (!t) return;
+    if (!t || shelfFilter !== "all") return;
     const id = t.dataset.id;
-    const idx = items.findIndex((x) => x.id === id);
+    const visible = visibleItems();
+    const idx = visible.findIndex((x) => x.id === id);
     if (e.shiftKey && lastClick >= 0) {
       const [a, b] = [Math.min(lastClick, idx), Math.max(lastClick, idx)];
-      items.slice(a, b + 1).forEach((x) => { if (!picked.includes(x.id)) picked.push(x.id); });
+      visible.slice(a, b + 1).forEach((x) => { if (!picked.includes(x.id)) picked.push(x.id); });
     } else {
       const n = picked.indexOf(id);
       n >= 0 ? picked.splice(n, 1) : picked.push(id);
@@ -436,8 +405,11 @@
     lastClick = idx;
     syncPicks();
   });
+  let shelfBusy = false;
   async function merge() {
-    if (picked.length < 2) return;
+    if (picked.length < 2 || shelfFilter !== "all" || shelfBusy) return;
+    shelfBusy = true;
+    grid.inert = true;
     const tiles = picked.map((id) => grid.querySelector(`[data-id="${id}"]`));
     const target = tiles[0].getBoundingClientRect();
     await Promise.all(tiles.slice(1).map((t, i) => {
@@ -457,42 +429,51 @@
       renderShelf();
       const pt = grid.querySelector(`[data-id="${pdf.id}"]`);
       pt.animate([{ transform: "scale(.82)" }, { transform: "scale(1)" }], { duration: 750, easing: SPRING });
-      showToast(`Merged ${n} shots into one PDF`);
+      showToast(`PDF preview · ${n} shots`);
     });
+    grid.inert = false;
+    shelfBusy = false;
   }
   function del() {
-    if (!picked.length) return;
+    if (!picked.length || shelfBusy) return;
+    shelfBusy = true;
+    grid.inert = true;
     const gone = [...picked];
     Promise.all(gone.map((id) => grid.querySelector(`[data-id="${id}"]`).animate(
       [{ transform: "none", opacity: 1 }, { transform: "scale(.6)", opacity: 0 }], { duration: 320, easing: STD, fill: "forwards" }).finished))
       .then(() => {
         flip(() => { items = items.filter((x) => !gone.includes(x.id)); picked = []; renderShelf(); });
-        showToast(`Moved ${gone.length} to the Recycle Bin`);
+        showToast(`Removed ${gone.length} from the demo`);
+        grid.inert = false;
+        shelfBusy = false;
       });
   }
   shMerge.addEventListener("click", merge);
   $("#shDel").addEventListener("click", del);
-  $("#shReset").addEventListener("click", resetShelf);
-  $("#shCopy").addEventListener("click", () => showToast(picked.length ? `Copied ${picked.length} to the clipboard` : "Select a shot to copy"));
+  $("#shReset").addEventListener("click", () => { if (!shelfBusy) resetShelf(); });
+  $("#shCopy").addEventListener("click", () => showToast(picked.length ? "Copy preview · clipboard unchanged" : "Select a demo shot"));
   $("#shPin").addEventListener("click", () => {
-    if (!picked.length) return showToast("Select a shot to pin");
+    if (!picked.length || shelfBusy) return showToast("Select a demo shot to pin");
     items.forEach((x) => { if (picked.includes(x.id)) x.pin = !x.pin; });
     renderShelf();
-    showToast("Pinned shots stay on the ledge after seven days");
+    showToast("Pin preview updated");
   });
   $$("#shelfTabs button").forEach((b) => b.addEventListener("click", () => {
-    $$("#shelfTabs button").forEach((x) => x.classList.toggle("on", x === b));
-    $$(".tile", grid).forEach((t, i) => { t.classList.remove("enter"); void t.offsetWidth; t.style.setProperty("--i", i); t.classList.add("enter"); });
+    if (shelfBusy) return;
+    shelfFilter = b.dataset.filter;
+    picked = []; lastClick = -1;
+    updateTabs();
+    renderShelf(true);
   }));
   let overShelf = false;
   $("#shelfScene").addEventListener("pointerenter", () => (overShelf = true));
   $("#shelfScene").addEventListener("pointerleave", () => (overShelf = false));
   addEventListener("keydown", (e) => {
-    if (!overShelf || typing(e)) return;
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); picked = items.map((x) => x.id); syncPicks(); }
+    if (!overShelf || typing(e) || shelfFilter !== "all" || shelfBusy) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); picked = visibleItems().map((x) => x.id); syncPicks(); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") { e.preventDefault(); picked = []; syncPicks(); }
     else if (e.key === "Delete") del();
-    else if (e.key === "ArrowRight" || e.key === "Enter") merge();
+    else if (e.key === "ArrowRight") merge();
   });
 
   // ───────── Redaction ─────────
@@ -515,12 +496,14 @@
   }
   const pressKbd = (el) => { el.classList.add("down"); setTimeout(() => el.classList.remove("down"), 180); };
   $$(".seal-side .step").forEach((st) => st.addEventListener("click", () => {
+    sealAuto = false;
     pressKbd(st.querySelector(".kbd"));
     const n = +st.dataset.step;
     setSeal(n === 0 ? (sealState === 3 ? 0 : 3) : n === sealState ? 0 : n);
   }));
   let sealAuto = true;
   doc.closest(".reveal").addEventListener("reveal", async () => {
+    if (reduced) return;
     await sleep(700);
     if (!sealAuto) return;
     pressKbd($('.step[data-step="1"] .kbd'));
@@ -721,22 +704,6 @@
       runTool(k);
     }
   });
-
-  // ───────── Stats ─────────
-  $$("[data-count]").forEach((card) => card.addEventListener("reveal", () => {
-    const sp = card.querySelector("[data-to]");
-    const to = +sp.dataset.to, from = +sp.dataset.from, dec = +(sp.dataset.dec || 0);
-    tween(1500, ease.emph, (t) => (sp.textContent = (to * t).toFixed(dec)));
-  }));
-  const race = $("#race");
-  const runRace = () => {
-    $$(".lane i", race).forEach((i) => {
-      const ms = +i.dataset.ms;
-      i.animate([{ width: "0%" }, { width: (ms / 150) * 100 + "%" }], { duration: 300 + ms * 15, easing: STD, fill: "forwards" });
-    });
-  };
-  race.addEventListener("reveal", () => setTimeout(runRace, 300));
-  race.addEventListener("click", runRace);
 
   // ───────── CTA icon tilt ─────────
   const icon = $("#icon3d .in");

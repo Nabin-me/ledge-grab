@@ -3,49 +3,79 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ledge Grab, a screenshot tool for Windows that keeps your shots in reach</title>
-  <meta name="description" content="Ledge Grab copies every screenshot to your clipboard and keeps your recent shots at the top of the screen, one hover away. It blurs emails and API keys before you share. Free and open source for Windows 10 and 11.">
   <meta name="theme-color" content="#070709">
-  <meta property="og:title" content="Ledge Grab">
-  <meta property="og:description" content="Your recent screenshots stay at the top of the screen, one hover away. Free for Windows.">
-  <meta property="og:image" content="assets/social.png">
   <link rel="icon" href="assets/ledge-grab.svg" type="image/svg+xml">
   <link rel="preload" href="assets/InterTight.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="stylesheet" href="styles.css">
+  <!-- Ledge Grab SEO: begin -->
+  <title>Ledge Grab | Free Screenshot Tool for Windows</title>
+  <meta name="description" content="Free, open-source screenshot tool for Windows 10 and 11. Capture, mark up and blur sensitive text, then copy or drag recent shots from your screen’s ledge.">
+  <link rel="canonical" href="https://ledgegrab.app/">
+  <meta name="robots" content="max-image-preview:large">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ledge Grab">
+  <meta property="og:url" content="https://ledgegrab.app/">
+  <meta property="og:title" content="Ledge Grab | Free Screenshot Tool for Windows">
+  <meta property="og:description" content="Free, open-source screenshot tool for Windows 10 and 11. Capture, mark up and blur sensitive text, then copy or drag recent shots from your screen’s ledge.">
+  <meta property="og:image" content="https://ledgegrab.app/assets/social.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="Ledge Grab app icon and wordmark beside the line ‘Screenshots that live on the ledge.’">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Ledge Grab | Free Screenshot Tool for Windows">
+  <meta name="twitter:description" content="Free, open-source screenshot tool for Windows 10 and 11. Capture, mark up and blur sensitive text, then copy or drag recent shots from your screen’s ledge.">
+  <meta name="twitter:image" content="https://ledgegrab.app/assets/social.png">
+  <meta name="twitter:image:alt" content="Ledge Grab app icon and wordmark beside the line ‘Screenshots that live on the ledge.’">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Ledge Grab",
+    "description": "Free, open-source screenshot tool for Windows 10 and 11. Capture, mark up and blur sensitive text, then copy or drag recent shots from your screen’s ledge.",
+    "url": "https://ledgegrab.app/",
+    "image": "https://ledgegrab.app/assets/social.png",
+    "applicationCategory": "UtilitiesApplication",
+    "operatingSystem": "Windows 10, Windows 11",
+    "isAccessibleForFree": true,
+    "license": "https://github.com/Nabin-me/ledge-grab/blob/main/LICENSE",
+    "sameAs": "https://github.com/Nabin-me/ledge-grab",
+    "offers": {
+      "@type": "Offer",
+      "price": 0,
+      "url": "https://github.com/Nabin-me/ledge-grab/releases/latest"
+    }
+  }
+  </script>
+  <noscript><style>.reveal, .fade-up, .stage, .display .w > span { opacity: 1; transform: none; filter: none; animation: none; } #captureDemo { display: none; }</style></noscript>
+  <!-- Ledge Grab SEO: end -->
 </head>
 <body>
   <div class="ambient" aria-hidden="true"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
   <div class="grain" aria-hidden="true"></div>
-  <div class="fly-layer" id="flyLayer" aria-hidden="true"></div>
 
-  <!-- Nav. At the top it is a plain bar. Scroll and it docks into the notch. -->
   <header class="nav" id="nav">
-    <div class="nav-notch" id="navNotch"></div>
+    <div class="nav-notch" aria-hidden="true"></div>
+    <div class="capture-tab" id="captureTab" aria-hidden="true">
+      <span class="capture-thumb" id="captureThumb"></span>
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 10 3 3 7-7"/></svg>
+    </div>
+    <span class="capture-status" id="captureStatus" role="status"></span>
     <div class="nav-row" id="navRow">
       <a href="#" class="brand" aria-label="Ledge Grab home"><img src="assets/mark-light.svg" alt=""><span class="brand-name">Ledge Grab</span></a>
-      <nav class="links" aria-label="Sections">
-        <a href="#ledge-section">Ledge</a>
-        <a href="#seal">Redaction</a>
-        <a href="#tools">Shortcuts</a>
-        <a href="#speed">Speed</a>
-      </nav>
-      <div class="right">
-        <button class="shelf-btn" id="shelfBtn" aria-label="Peek at recent shots">
-          <span class="stackicon"><i></i><i></i></span><span class="count" id="ledgeCount">3</span><span class="dot"></span>
-        </button>
-        <a href="https://github.com/Nabin-me/ledge-grab/releases/latest" class="btn sm" id="navDl">Download</a>
-      </div>
+      <button class="shelf-btn" id="shelfBtn" type="button" aria-label="Recent shots demo" aria-controls="navPanel" aria-expanded="false">
+        <svg class="notch-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="7.5" width="13" height="10" rx="2.5"/><path d="M8 7.5v-1a2.5 2.5 0 0 1 2.5-2.5h7a2.5 2.5 0 0 1 2.5 2.5v6a2.5 2.5 0 0 1-2.5 2.5M8 14l2-2 2.5 2.5 1.5-1.5 1.5 1.5"/></svg>
+        <span>Recent</span>
+        <svg class="notch-chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 5 2.5 2.5L8.5 5"/></svg>
+      </button>
+      <a href="#download" class="btn sm" id="navDl">Download</a>
     </div>
-    <div class="nav-panel" id="navPanel">
+    <div class="nav-panel" id="navPanel" inert>
       <div class="ledge-tiles" id="ledgeTiles"></div>
       <div class="ledge-bar">
-        <button class="iconbtn" data-tip="Copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="3"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></button>
-        <button class="iconbtn" data-tip="Pin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 3.5 20.5 9.5l-3 1-3.5 3.5-.5 4-3-3-5 5M9.5 8.5l1-3"/><path d="m9 9-4 .5 9.5 9.5"/></svg></button>
-        <button class="iconbtn" data-tip="Delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
-        <button class="iconbtn" data-tip="Merge, float or queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
-        <span class="ledge-hint">Click a shot to copy it</span>
+        <span class="ledge-hint" id="ledgeHint" role="status">Recent shots demo</span>
         <span class="sp"></span>
-        <button class="iconbtn" data-tip="Collapse" id="ledgeClose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg></button>
+        <button class="iconbtn" type="button" data-tip="Close" aria-label="Close recent shots" id="ledgeClose"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18 18 6"/></svg></button>
       </div>
     </div>
   </header>
@@ -54,9 +84,9 @@
     <!-- ───────── HERO ───────── -->
     <section class="hero">
       <div class="wrap">
-        <a class="eyebrow fade-up" style="--d:.05s" href="https://github.com/Nabin-me/ledge-grab/releases/latest"><span class="pill">v0.1.2</span> Free and open source for Windows</a>
-        <h1 class="display" id="heroTitle">Never lose<br><span class="soft">a screenshot again.</span></h1>
-        <p class="lede fade-up" style="--d:.7s">Every capture goes to your clipboard and stays at the top of your screen for a week. Hover to copy an older shot again, drag it into a chat, or merge a few into one PDF. Emails and API keys get blurred before anyone sees them.</p>
+        <a class="eyebrow fade-up" style="--d:.05s" href="https://github.com/Nabin-me/ledge-grab/releases/latest"><span class="pill">v0.1.2</span> Latest release</a>
+        <h1 class="display" id="heroTitle" aria-label="Never lose a screenshot again.">Never lose<br><span class="soft">a screenshot again.</span></h1>
+        <p class="lede fade-up" style="--d:.7s">Recent screenshots stay at the top of your screen, ready to copy or drag.</p>
         <div class="cta-row fade-up" style="--d:.85s">
           <a class="btn" href="https://github.com/Nabin-me/ledge-grab/releases/latest">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10.4 4.5v7.1H3zM11.3 4.4 21 3v8.6h-9.7zM3 12.4h7.4v7.1L3 18.5zM11.3 12.4H21V21l-9.7-1.4z"/></svg>
@@ -67,13 +97,17 @@
             Star on GitHub
           </a>
         </div>
-        <div class="meta-row fade-up" style="--d:1s"><span>Windows 10 and 11</span><span>3 MB download</span><span>Works offline</span><span>MIT license</span></div>
+        <div class="meta-row fade-up" style="--d:1s"><span>Works offline</span><span>Built in Rust</span><span>Open source</span></div>
+      </div>
+
+      <div class="capture-controls">
+        <button class="btn ghost sm" id="captureDemo" type="button">Try a capture</button>
+        <div class="keys" id="heroKeys" aria-label="Windows app shortcut: Control, Shift, S"><kbd class="kbd">Ctrl</kbd><span class="plus" aria-hidden="true">+</span><kbd class="kbd">Shift</kbd><span class="plus" aria-hidden="true">+</span><kbd class="kbd">S</kbd></div>
       </div>
 
       <div class="stage-wrap">
         <div class="stage-glow"></div>
         <div class="stage" id="stage">
-          <div class="s-notch"></div>
           <div class="toolbar" id="toolbar">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2"/></svg>
             <span>Blur</span><span class="opt">Pixelate</span>
@@ -111,7 +145,6 @@
           <div class="flash" id="flash"></div>
         </div>
       </div>
-      <div class="keys fade-up" style="--d:1.4s; margin-top:30px" id="heroKeys"><span class="kbd">Ctrl</span><span class="plus">+</span><span class="kbd">Shift</span><span class="plus">+</span><span class="kbd">S</span></div>
       <div class="scroll-cue" aria-hidden="true"></div>
     </section>
 
@@ -120,49 +153,45 @@
       <div class="wrap">
         <div class="split">
           <div>
-            <h2 class="title reveal" style="--i:1">Your last shots wait at the top of the screen.</h2>
+            <h2 class="title reveal" style="--i:1">Your screenshots, within reach.</h2>
           </div>
-          <p class="sub reveal" style="--i:2">Hover the ledge to see your last three shots and click one to copy it. Open the shelf for the full week of history. Tick a few shots below and press the arrow to merge them into one PDF.</p>
+          <p class="sub reveal" style="--i:2">Hover for recent shots. Click one to copy.</p>
         </div>
 
-        <div class="shelf-scene reveal" id="shelfScene">
+        <div class="shelf-scene reveal" id="shelfScene" aria-label="Screenshot shelf demo">
           <div class="shelf">
-            <div class="shelf-tabs" id="shelfTabs"><button class="on">All</button><button>Clips</button><button>App folders</button><button>Hidden</button></div>
+            <div class="shelf-tabs" id="shelfTabs"><button class="on" type="button" aria-pressed="true" data-filter="all">All</button><button type="button" aria-pressed="false" data-filter="clip">Clips</button><button type="button" aria-pressed="false" data-filter="folder">App folders</button><button type="button" aria-pressed="false" data-filter="hidden">Hidden</button><span class="shelf-demo-label">Shelf demo</span></div>
             <div class="shelf-grid" id="shelfGrid"></div>
             <div class="shelf-bar">
-              <button class="iconbtn" data-tip="Copy  Ctrl+C" id="shCopy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="3"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></button>
-              <button class="iconbtn" data-tip="Pin  P" id="shPin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 3.5 20.5 9.5l-3 1-3.5 3.5-.5 4-3-3-5 5M9.5 8.5l1-3"/><path d="m9 9-4 .5 9.5 9.5"/></svg></button>
-              <button class="iconbtn" data-tip="Delete  Del" id="shDel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
-              <button class="iconbtn dim primary" data-tip="Merge into PDF" id="shMerge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
-              <span class="status" id="shStatus">Tick two or more shots, then press the arrow</span>
+              <button class="iconbtn" data-tip="Copy  Ctrl+C" aria-label="Copy" id="shCopy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="3"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></button>
+              <button class="iconbtn" data-tip="Pin  P" aria-label="Pin" id="shPin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 3.5 20.5 9.5l-3 1-3.5 3.5-.5 4-3-3-5 5M9.5 8.5l1-3"/><path d="m9 9-4 .5 9.5 9.5"/></svg></button>
+              <button class="iconbtn" data-tip="Delete  Del" aria-label="Delete" id="shDel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
+              <button class="iconbtn dim primary" data-tip="Merge into PDF" aria-label="Merge into PDF" id="shMerge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+              <span class="status" id="shStatus">Select shots to make a PDF.</span>
               <span class="sp"></span>
-              <button class="iconbtn" data-tip="Reset" id="shReset"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button>
-              <button class="iconbtn" data-tip="Collapse"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg></button>
+              <button class="iconbtn" data-tip="Reset" aria-label="Reset" id="shReset"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button>
+
             </div>
           </div>
-          <div class="shelf-caption"><span>Click to select</span><span>Shift-click a range</span><span>Ctrl+A selects all</span></div>
-          <div class="toast" id="toast">Merged into one PDF</div>
+
+          <div class="toast" id="toast" role="status"></div>
         </div>
 
         <div class="feature-grid">
           <div class="panel spot feat reveal">
             <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></div>
-            <h3>Drag a shot out</h3><p>Drop the PNG file straight into Slack, Discord or an email.</p>
+            <h3>Drag into a chat</h3><p>Drop a shot straight into a message.</p>
           </div>
           <div class="panel spot feat reveal" style="--i:1">
             <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="13" height="13" rx="3"/><path d="M4 15V6a2 2 0 0 1 2-2h9"/></svg></div>
-            <h3>Float a shot over your work</h3><p>Keep a reference on top of every window. Scroll to resize it and hold Ctrl while scrolling to fade it.</p>
+            <h3>Float a reference</h3><p>Keep a screenshot visible while you work.</p>
           </div>
           <div class="panel spot feat reveal" style="--i:2">
             <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg></div>
-            <h3>Paste several in order</h3><p>Queue up shots and each Ctrl+V pastes the next one.</p>
+            <h3>Paste in order</h3><p>Queue a few shots. Each paste takes the next one.</p>
           </div>
         </div>
 
-        <figure class="panel reel reveal">
-          <img src="assets/notch.webp" alt="Hovering the ledge, copying a shot, opening history and merging three shots into a PDF" loading="lazy" width="1120" height="490">
-          <figcaption><span class="live">Recorded live on Windows 11</span><span>Hover, copy, open history, then merge three shots into a PDF</span></figcaption>
-        </figure>
       </div>
     </section>
 
@@ -171,9 +200,9 @@
       <div class="wrap">
         <div class="split">
           <div>
-            <h2 class="title reveal" style="--i:1">Share the screenshot, <span class="soft">keep the secrets.</span></h2>
+            <h2 class="title reveal" style="--i:1">Blur sensitive text.</h2>
           </div>
-          <p class="sub reveal" style="--i:2">Press B on a frozen screen and Ledge Grab finds emails, card numbers, phone numbers and API keys with the text recognition built into Windows. Press B again to blur all of them. Try it here with the B key.</p>
+          <p class="sub reveal" style="--i:2">Press B to find emails, keys, and card numbers. Press it again to blur.</p>
         </div>
 
         <div class="seal">
@@ -185,14 +214,14 @@
               <p>Card <span class="sec" style="--i:1"><span class="txt">4242 4242 4242 4242</span></span></p>
               <p>Key <span class="sec" style="--i:2"><span class="txt">sk-demo_7QX2KM9P40TVaa12</span></span></p>
               <p>Call <span class="sec" style="--i:3"><span class="txt">(415) 555-0132</span></span> today</p>
-              <p>Nothing private here</p>
+
             </div>
           </div>
           <div class="panel seal-side reveal" style="--i:1">
-            <div class="step" data-step="1"><span class="kbd">B</span><div><h4>Find</h4><p>Ledge Grab outlines emails, card numbers, IBANs, phone numbers, JWTs and API keys. Card numbers must pass the Luhn check.</p></div></div>
-            <div class="step" data-step="2"><span class="kbd">B</span><div><h4>Blur</h4><p>The blur replaces the pixels in the saved PNG, so nobody can read the original text back.</p></div></div>
-            <div class="step" data-step="0"><span class="kbd">E</span><div><h4>Erase</h4><p>Smart erase paints over the text with the surrounding background.</p></div></div>
-            <p class="note">You can also drag over any area or click a single word to blur it. Text recognition runs on your PC.</p>
+            <button class="step" type="button" data-step="1"><span class="kbd">B</span><span><span class="step-title">Find</span><span class="step-copy">Find common emails, numbers and keys.</span></span></button>
+            <button class="step" type="button" data-step="2"><span class="kbd">B</span><span><span class="step-title">Blur</span><span class="step-copy">Blur the matches.</span></span></button>
+            <button class="step" type="button" data-step="0"><span class="kbd">E</span><span><span class="step-title">Erase</span><span class="step-copy">Paint over text with the surrounding color.</span></span></button>
+            <p class="note">Check the result before sharing.</p>
           </div>
         </div>
       </div>
@@ -203,9 +232,9 @@
       <div class="wrap">
         <div class="split">
           <div>
-            <h2 class="title reveal" style="--i:1">Mark it up with one key.</h2>
+            <h2 class="title reveal" style="--i:1">Mark it up before you send it.</h2>
           </div>
-          <p class="sub reveal" style="--i:2">The screen freezes when you press the hotkey, so menus and tooltips stay in the shot. Each tool has its own key. Scroll to change the stroke width and right-click to undo. Press a key below to try a tool.</p>
+          <p class="sub reveal" style="--i:2">Draw on a frozen screen. Menus stay open.</p>
         </div>
 
         <div class="tools">
@@ -217,7 +246,7 @@
               <div class="mode"><span>Window</span><span class="keys"><span class="kbd">Alt</span><span class="kbd">PrtSc</span></span></div>
               <div class="mode"><span>Clip as MP4</span><span class="keys"><span class="kbd">Shift</span><span class="kbd">PrtSc</span></span></div>
             </div>
-            <div class="hint">The ledge has more modes: copy text, pick a color, scrolling capture, delay and interval.</div>
+
           </div>
           <div class="panel canvas reveal" style="--i:1">
             <div class="tname"><span class="kbd" id="tnameKey">A</span><b id="tname">Arrow</b></div>
@@ -236,75 +265,14 @@
       </div>
     </section>
 
-    <!-- ───────── SPEED ───────── -->
-    <section class="block" id="speed">
-      <div class="wrap">
-        <div class="split">
-          <div>
-            <h2 class="title reveal" style="--i:1">A region reaches your clipboard in under 10 ms.</h2>
-          </div>
-          <p class="sub reveal" style="--i:2">Ledge Grab reads the screen through DXGI Desktop Duplication on your GPU and draws with Direct2D. It is one 3 MB executable written in Rust, with no runtime to install. At idle it uses less than 0.3% of one CPU core.</p>
-        </div>
-        <div class="perf">
-          <div class="panel spot stat reveal" data-count><div class="num"><span data-to="9">9</span><small>ms</small></div><div class="lbl">Region to clipboard</div><div class="meter"><i style="--v:.09"></i></div></div>
-          <div class="panel spot stat reveal" style="--i:1" data-count><div class="num"><span data-to="22">22</span><small>ms</small></div><div class="lbl">Full screen to clipboard</div><div class="meter"><i style="--v:.22"></i></div></div>
-          <div class="panel spot stat reveal" style="--i:2" data-count><div class="num"><span data-to="65">65</span><small>ms</small></div><div class="lbl">Hotkey to frozen screen</div><div class="meter"><i style="--v:.65"></i></div></div>
-          <div class="panel spot stat reveal" style="--i:3" data-count><div class="num"><span data-to="0.3" data-dec="1">0.3</span><small>%</small></div><div class="lbl">CPU at idle, one core</div><div class="meter"><i style="--v:.03"></i></div></div>
-        </div>
-        <div class="panel race reveal" id="race">
-          <div class="row us"><span class="nm">Region to clipboard</span><span class="lane"><i data-ms="9"></i></span><span class="t">9 ms</span></div>
-          <div class="row"><span class="nm">Screen to clipboard</span><span class="lane"><i data-ms="22"></i></span><span class="t">22 ms</span></div>
-          <div class="row"><span class="nm">Hotkey to frozen</span><span class="lane"><i data-ms="65"></i></span><span class="t">65 ms</span></div>
-          <div class="row"><span class="nm">An eye blink</span><span class="lane"><i data-ms="150" style="background:rgba(255,255,255,.14)"></i></span><span class="t">~150 ms</span></div>
-          <div class="legend"><span>0 ms</span><span>Slowest measured run on an RTX 3070 laptop at 2560 by 1440</span><span>150 ms</span></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ───────── TRUST ───────── -->
-    <section class="block" id="privacy">
-      <div class="wrap">
-        <h2 class="title reveal" style="--i:1">Your screen never leaves your machine.</h2>
-        <div class="trust">
-          <div class="panel spot reveal">
-            <div class="net" aria-hidden="true">
-              <svg viewBox="0 0 320 120" fill="none">
-                <rect x="14" y="36" width="52" height="48" rx="10" fill="#15161a" stroke="rgba(255,255,255,.14)"/>
-                <path d="M30 76h20" stroke="rgba(243,237,225,.5)" stroke-width="2" stroke-linecap="round"/>
-                <rect x="28" y="48" width="24" height="20" rx="4" fill="#ece5d7" opacity=".9"/>
-                <path d="M72 60 H 248" stroke="rgba(255,255,255,.28)" stroke-dasharray="2 6" stroke-linecap="round"/>
-                <circle class="packet" r="4" fill="#8fd0ff" style="filter:drop-shadow(0 0 6px #3b9eff)"/>
-                <g transform="translate(176 60)"><circle r="15" fill="#1a0c10" stroke="#f0506e" stroke-width="1.5"/><path d="M-5-5 5 5M5-5-5 5" stroke="#f0506e" stroke-width="2" stroke-linecap="round"/></g>
-                <path d="M270 72a14 14 0 0 1 2-28 18 18 0 0 1 34 6 11 11 0 0 1-2 22z" stroke="rgba(255,255,255,.22)" fill="none"/>
-              </svg>
-            </div>
-            <h3>No network access</h3>
-            <p>Ledge Grab sends no requests, has no analytics and uploads no crash reports. It never stores text you copy.</p>
-          </div>
-          <div class="panel spot reveal" style="--i:1">
-            <div class="bigglyph">MIT<span>.</span></div>
-            <h3>Open source</h3>
-            <p>GitHub Actions builds every release from the public repository and publishes SHA-256 checksums.</p>
-          </div>
-          <div class="panel spot reveal" style="--i:2">
-            <div class="bigglyph">7<span>d</span></div>
-            <h3>Plain PNG files</h3>
-            <p>Shots save to Pictures in a folder for each day and app. After seven days they leave the ledge, but the files stay on disk.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- ───────── CTA ───────── -->
     <section class="cta" id="download">
       <div class="wrap">
         <div class="icon3d reveal" id="icon3d"><div class="in"><img src="assets/ledge-grab.svg" alt="Ledge Grab app icon"></div></div>
         <h2 class="reveal" style="--i:1">Get Ledge Grab for Windows.</h2>
-        <p class="sub reveal" style="--i:2">It is free and runs on Windows 10 and 11. The installer needs no admin rights and there is no account to create.</p>
-        <div class="dl">
-          <a class="panel spot reveal" style="--i:2" href="https://github.com/Nabin-me/ledge-grab/releases/latest"><b>Installer <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5M5 20h14"/></svg></b><span>Adds a Start Menu shortcut and can launch at login. Uninstall from Windows Settings.</span><code>LedgeGrab-Setup-x64.exe</code></a>
-          <a class="panel spot reveal" style="--i:3" href="https://github.com/Nabin-me/ledge-grab/releases/latest"><b>Portable <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5M5 20h14"/></svg></b><span>Unzip the folder and run it from anywhere.</span><code>win-x64-portable.zip</code></a>
-          <a class="panel spot reveal" style="--i:4" href="https://github.com/Nabin-me/ledge-grab/releases/latest"><b>Single .exe <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5M5 20h14"/></svg></b><span>One 3 MB executable with nothing else to install.</span><code>win-x64.exe</code></a>
+        <p class="sub reveal" style="--i:2">Free for Windows 10 and 11.</p>
+        <div class="cta-row reveal" style="--i:3">
+          <a class="btn" href="https://github.com/Nabin-me/ledge-grab/releases/latest">Download for Windows</a>
         </div>
       </div>
     </section>
@@ -313,7 +281,7 @@
   <footer>
     <div class="wrap">
       <span class="brand"><img src="assets/mark-light.svg" alt="">Ledge Grab</span>
-      <nav><a href="https://github.com/Nabin-me/ledge-grab">GitHub</a><a href="https://github.com/Nabin-me/ledge-grab/releases">Releases</a><a href="https://github.com/Nabin-me/ledge-grab/blob/main/LICENSE">MIT License</a></nav>
+      <nav aria-label="Project"><a href="https://github.com/Nabin-me/ledge-grab">GitHub</a><a href="https://github.com/Nabin-me/ledge-grab/blob/main/LICENSE">MIT license</a></nav>
     </div>
   </footer>
 
