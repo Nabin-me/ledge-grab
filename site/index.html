@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#070709">
   <link rel="icon" href="assets/ledge-grab.svg" type="image/svg+xml">
   <link rel="preload" href="assets/InterTight.ttf" as="font" type="font/ttf" crossorigin>
-  <link rel="stylesheet" href="styles.css?v=20261126d">
+  <link rel="stylesheet" href="styles.css?v=20261127b">
   <style>/* try-capture demo: reserves the playground box */ #tryit{width:min(1180px,calc(100% - 32px));margin:56px auto 0;aspect-ratio:1180/660}@media (max-width:860px){#tryit{aspect-ratio:auto;height:940px}}</style>
   <!-- Ledge Grab SEO: begin -->
   <title>Ledge Grab | Free Screenshot Tool for Windows</title>
@@ -48,7 +48,7 @@
     }
   }
   </script>
-  <noscript><style>.reveal, .fade-up, .stage, .display .w > span { opacity: 1; transform: none; filter: none; animation: none; } #captureDemo { display: none; }</style></noscript>
+  <noscript><style>.reveal, .fade-up, .stage, .display .w > span { opacity: 1; transform: none; filter: none; animation: none; }</style></noscript>
   <!-- Ledge Grab SEO: end -->
 </head>
 <body>
@@ -56,29 +56,9 @@
   <div class="grain" aria-hidden="true"></div>
 
   <header class="nav" id="nav">
-    <div class="nav-notch" aria-hidden="true"></div>
-    <div class="capture-tab" id="captureTab" aria-hidden="true">
-      <span class="capture-thumb" id="captureThumb"></span>
-      <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 10 3 3 7-7"/></svg>
-    </div>
-    <span class="capture-status" id="captureStatus" role="status"></span>
-    <div class="nav-row" id="navRow">
+    <div class="nav-row">
       <a href="#" class="brand" aria-label="Ledge Grab home"><img src="assets/mark-light.svg" alt=""><span class="brand-name">Ledge Grab</span></a>
-      <button class="shelf-btn" id="shelfBtn" type="button" aria-label="3 recent shots" aria-controls="navPanel" aria-expanded="false">
-        <span class="shelf-thumb" id="shelfThumb" aria-hidden="true"></span>
-        <span class="shelf-count" id="shelfCount">3</span>
-        <span class="shelf-dot" aria-hidden="true"></span>
-        <svg class="notch-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3.5 5 2.5 2.5L8.5 5"/></svg>
-      </button>
       <a href="#download" class="btn sm" id="navDl">Download</a>
-    </div>
-    <div class="nav-panel" id="navPanel" inert>
-      <div class="ledge-tiles" id="ledgeTiles"></div>
-      <div class="ledge-bar">
-        <span class="ledge-hint" id="ledgeHint" role="status">Recent shots demo</span>
-        <span class="sp"></span>
-        <button class="iconbtn" type="button" data-tip="Close" aria-label="Close recent shots" id="ledgeClose"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M6 18 18 6"/></svg></button>
-      </div>
     </div>
   </header>
 
@@ -286,7 +266,7 @@
     </div>
   </footer>
 
-  <script src="main.js?v=20261126d"></script>
-  <script type="module" src="demo/tryit.js"></script><!-- try-capture demo -->
+  <script src="main.js?v=20261127a"></script>
+  <script type="module" src="demo/tryit.js?v=5"></script><!-- try-capture demo -->
 </body>
 </html>
