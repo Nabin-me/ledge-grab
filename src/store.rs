@@ -180,7 +180,9 @@ fn dated_location(root: &Path, app: &str, [year, month, day]: [u16; 3], [hour, m
 impl Store {
     pub fn open() -> rusqlite::Result<Store> {
         // LEDGE_GRAB_DIR keeps test runs away from the real history.
-        let test = std::env::var_os("LEDGE_GRAB_DIR").map(PathBuf::from);
+        let test = std::env::var_os("LEDGE_GRAB_DIR").map(PathBuf::from).or_else(|| {
+            crate::scroll_pdf_preview().then(|| env_dir("LOCALAPPDATA").join("Ledge Grab Scroll PDF Preview"))
+        });
         let data = test.clone().unwrap_or_else(|| env_dir("LOCALAPPDATA").join("Ledge Grab"));
         let pictures = windows_pictures().unwrap_or_else(|| env_dir("USERPROFILE").join("Pictures"));
         let folder = test.map(|t| t.join("shots")).unwrap_or_else(|| pictures.join("Ledge Grab"));

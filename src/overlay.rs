@@ -21,6 +21,7 @@ pub enum Mode {
     All,
     Last,
     Scroll,
+    ScrollPdf,
     Delay,
     Interval,
     Text,
@@ -30,7 +31,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Mode; 12] = [
+    pub const ALL: [Mode; 13] = [
         Mode::Region,
         Mode::Window,
         Mode::Screen,
@@ -43,6 +44,7 @@ impl Mode {
         Mode::Color,
         Mode::Clip,
         Mode::Float,
+        Mode::ScrollPdf,
     ];
     pub fn index(self) -> usize {
         Mode::ALL.iter().position(|m| *m == self).unwrap()
@@ -343,6 +345,10 @@ impl Overlay {
             }
         }
         self.panes.clear();
+    }
+
+    pub fn previous_window(&self) -> isize {
+        self.prev.0 as isize
     }
 
     pub fn refocus(&self) {

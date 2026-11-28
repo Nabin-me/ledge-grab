@@ -14,6 +14,8 @@ mod pretty;
 mod rec;
 mod redact;
 mod scroll;
+mod scroll_pdf;
+mod scroll_pdf_core;
 mod secrets;
 mod store;
 
@@ -23,7 +25,8 @@ use gfx::Gfx;
 use notch::{Notch, View};
 use overlay::{Mode, Outcome, Overlay};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicPtr, Ordering::Relaxed};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 use store::{Kind, Store};
 use windows::Win32::Foundation::*;
@@ -70,6 +73,7 @@ enum Work {
     Name(i64, String),
     Clip(Option<rec::Clip>),
     Gif(Option<(PathBuf, i64)>),
+    ScrollPdf(Result<(PathBuf, Frame, String, scroll_pdf::End), (&'static str, &'static str)>),
     Failed,
 }
 
@@ -95,6 +99,7 @@ pub struct App {
     seen: u64,
     quitting: bool,
     pub interval: Option<RECT>,
+    scroll_pdf_stop: Option<Arc<AtomicBool>>,
     pub login: bool,
     pub outgoing: Vec<i64>,
     count: i64,
@@ -126,6 +131,13 @@ fn app() -> Option<&'static mut App> {
 }
 fn notch() -> Option<&'static mut Notch> {
     unsafe { NOTCH.load(Relaxed).as_mut() }
+}
+
+/// Private launch mode: no registered shortcuts or copied-image monitoring.
+pub fn scroll_pdf_preview() -> bool {
+    static PREVIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PREVIEW.get_or_init(|| option_env!("LEDGE_GRAB_SCROLL_PDF_PREVIEW_BUILD").is_some()
+        || std::env::var_os("LEDGE_GRAB_SCROLL_PDF_PREVIEW").is_some())
 }
 
 pub fn testing() -> bool {
@@ -341,7 +353,10 @@ impl App {
     }
 
     pub fn quit(&mut self, n: &mut Notch) {
-        if self.rec.is_some() {
+        if self.scroll_pdf_busy() {
+            self.quitting = true;
+            self.stop_scroll_pdf(n);
+        } else if self.rec.is_some() {
             // Finish the clip first.
             self.quitting = true;
             self.stop_rec(n);
@@ -384,7 +399,7 @@ impl App {
 
     /// Claim hotkeys we don't hold yet. Returns true if any changed.
     fn register(&mut self) -> bool {
-        if testing() || !HOOK.load(Relaxed).is_null() {
+        if testing() || scroll_pdf_preview() || !HOOK.load(Relaxed).is_null() {
             return false;
         }
         let s = &self.store.settings;
@@ -518,7 +533,75 @@ impl App {
         self.store.save_settings();
     }
 
+    pub fn scroll_pdf_busy(&self) -> bool {
+        self.scroll_pdf_stop.is_some()
+    }
+
+    pub fn scroll_pdf_stopping(&self) -> bool {
+        self.scroll_pdf_stop.as_ref().is_some_and(|stop| stop.load(Relaxed))
+    }
+
+    pub fn stop_scroll_pdf(&mut self, n: &mut Notch) {
+        if let Some(stop) = &self.scroll_pdf_stop {
+            stop.store(true, Relaxed);
+            n.repaint();
+        }
+    }
+
+    fn start_scroll_pdf(&mut self, n: &mut Notch, region: RECT, target: isize, app: String) {
+        if self.scroll_pdf_busy() || self.rec.is_some() || self.interval.is_some() {
+            return n.pdf_error(&self.g, &self.store, "Another capture is running", "Stop it before starting Scroll to PDF.");
+        }
+        n.show(&self.g, &self.store, View::PdfScroll);
+        if let Err(error) = scroll_pdf::valid_pane(region, n.island_px()) {
+            let (title, hint) = error.details();
+            return n.pdf_error(&self.g, &self.store, title, hint);
+        }
+        let path = match self.store.new_path("pdf", &app) {
+            Ok(path) => path,
+            Err(e) => {
+                note(&format!("Scroll PDF output directory failed: {:?}", e.kind()));
+                return n.pdf_error(&self.g, &self.store, "Cannot create the PDF folder", "Check the save folder and its permissions.");
+            }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        self.scroll_pdf_stop = Some(stop.clone());
+        let main = self.main.0 as isize;
+        note(&format!("Scroll PDF pane: {} × {} physical pixels", region.right - region.left, region.bottom - region.top));
+        std::thread::spawn(move || {
+            let result = (|| {
+                let captured = scroll_pdf::run(region, target, &stop)
+                    .inspect_err(|e| note(&format!("Scroll PDF did not start: {e:?}")))
+                    .map_err(scroll_pdf::End::start_details)?;
+                stop.store(true, Relaxed); // no more scrolling; final encode/write
+                let end = captured.end;
+                let (pdf, pages) = pdf::scroll_pages(&captured.frame)
+                    .ok_or(("Could not encode the PDF", "Try a smaller selection and check the launch log."))?;
+                let thumb = captured.frame.thumb(store::THUMB.0, store::THUMB.1);
+                let output = if end == scroll_pdf::End::NoMoreMovement { path } else {
+                    let stem = path.file_stem().and_then(|n| n.to_str())
+                        .ok_or(("Cannot name the partial PDF", "Choose a different save folder."))?;
+                    path.with_file_name(format!("{stem} - partial.pdf"))
+                };
+                if output.exists() {
+                    return Err(("PDF filename already exists", "The old file was kept. Start a new capture."));
+                }
+                store::write_file(&output, &pdf).map_err(|e| {
+                    note(&format!("Scroll PDF write failed: {:?}", e.kind()));
+                    ("Could not write the PDF", "Check free space and save-folder permissions.")
+                })?;
+                note(&format!("Scroll PDF saved {pages} pages: {end:?}"));
+                Ok((output, thumb, app, end))
+            })();
+            post(main, Work::ScrollPdf(result));
+        });
+    }
+
     fn start(&mut self, n: &mut Notch, m: Mode) {
+        if self.scroll_pdf_busy() { return; }
+        if m == Mode::ScrollPdf && (self.rec.is_some() || self.interval.is_some() || self.count > 0) {
+            return n.pdf_error(&self.g, &self.store, "Another capture is running", "Stop it before starting Scroll to PDF.");
+        }
         if self.overlay.as_ref().is_some_and(|o| !o.flying()) {
             return;
         }
@@ -556,7 +639,11 @@ impl App {
                     }
                     Err(e) => {
                         note(&format!("overlay failed {e}"));
-                        n.fail();
+                        if m == Mode::ScrollPdf {
+                            n.pdf_error(&self.g, &self.store, "Could not start the picker", "Use a regular foreground window; see the launch log.");
+                        } else {
+                            n.fail();
+                        }
                     }
                 }
             }
@@ -565,6 +652,7 @@ impl App {
 
     /// The window hotkey: whatever is in front.
     fn front_window(&mut self, n: &mut Notch) {
+        if self.scroll_pdf_busy() { return; }
         let h = unsafe { GetForegroundWindow() };
         if let Some(r) = capture::window_rect(h).and_then(|r| capture::intersect(&r, &capture::desktop(&monitors()))) {
             self.grab_now(n, r);
@@ -589,6 +677,13 @@ impl App {
                 n.done(&self.g, &self.store);
             }
             Outcome::Shot(r) => match o.mode {
+                Mode::ScrollPdf => {
+                    let app = o.app(r);
+                    let target = o.previous_window();
+                    o.refocus();
+                    o.close();
+                    self.start_scroll_pdf(n, r, target, app);
+                }
                 Mode::Scroll => {
                     let app = o.app(r);
                     o.refocus();
@@ -1021,6 +1116,21 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                         None => n.fail(),
                     }
                 }
+                Work::ScrollPdf(result) => {
+                    a.scroll_pdf_stop = None;
+                    match result {
+                        Ok((path, thumb, app, end)) => {
+                            if let Ok(id) = a.store.add(&path, Kind::Pdf, &thumb, &app, 0) {
+                                n.pdf_saved(&a.g, &a.store, id, end != scroll_pdf::End::NoMoreMovement);
+                            } else {
+                                // The file is already safely written; don't delete it on an index error.
+                                n.pdf_error(&a.g, &a.store, "PDF saved, shelf index failed", "Look in the preview save folder for your PDF.");
+                            }
+                        }
+                        Err((title, hint)) => n.pdf_error(&a.g, &a.store, title, hint),
+                    }
+                    if a.quitting { a.quit(n); }
+                }
                 Work::Text(t) => {
                     clip::set_text(a.main, &t);
                     n.done(&a.g, &a.store);
@@ -1082,7 +1192,9 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
             T_TICK => {
                 let desk = desk_open();
                 n.adapt(&a.g, desk);
-                let hide = a.overlay.is_none() && fullscreen(&n.mon) && !testing();
+                let hide = a.overlay.is_none() && !a.scroll_pdf_busy()
+                    && !matches!(n.view, View::PdfError(..) | View::PdfSaved(..))
+                    && fullscreen(&n.mon) && !testing();
                 n.hide(hide);
                 if a.register() {
                     n.repaint();
@@ -1204,8 +1316,39 @@ fn restart() -> ! {
     std::process::exit(0)
 }
 
+/// A GUI binary otherwise gives no indication when a launch stops before the ledge exists.
+fn preview_launch_error(stage: &str, detail: &str) -> ! {
+    let message = format!("{stage}\n\n{detail}\n\nIf you used Start Preview.cmd, you can share preview-launch.log.");
+    note(&format!("Launch stopped at {stage}: {detail}"));
+    let wide: Vec<u16> = message.encode_utf16().chain([0]).collect();
+    unsafe {
+        let _ = MessageBoxW(None, windows::core::PCWSTR(wide.as_ptr()), w!("Ledge Grab Scroll to PDF Preview"),
+            MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+    }
+    std::process::exit(2);
+}
+
+fn startup_result<T, E: std::fmt::Display>(value: Result<T, E>, stage: &str) -> T {
+    match value {
+        Ok(value) => value,
+        Err(err) if scroll_pdf_preview() => preview_launch_error(stage, &err.to_string()),
+        Err(err) => panic!("{stage}: {err}"),
+    }
+}
+
+fn composition_failed(err: windows::core::Error) -> ! {
+    if scroll_pdf_preview() {
+        preview_launch_error("DirectComposition could not draw the preview", &err.to_string());
+    }
+    restart()
+}
+
 fn main() {
     unsafe {
+        let preview = scroll_pdf_preview();
+        if preview {
+            note("Preview process started");
+        }
         let name = if testing() { w!("Local\\LedgeGrabTest") } else { w!("Local\\LedgeGrab") };
         let restarted = std::env::args().any(|a| a == "--restarted");
         let mut lock = CreateMutexW(None, true, name);
@@ -1216,17 +1359,26 @@ fn main() {
             }
             tries += 1;
             if !restarted || tries > 40 {
+                if preview {
+                    preview_launch_error("Ledge Grab is already running",
+                        "Quit the regular Ledge Grab or an earlier preview from its ledge menu, then launch the preview again. No files were changed.");
+                }
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));
             lock = CreateMutexW(None, true, name);
         }
+        if preview {
+            if let Err(err) = &lock { preview_launch_error("Could not claim the Ledge Grab instance lock", &err.to_string()); }
+            if monitors().is_empty() { preview_launch_error("No desktop monitor found", "Open the preview from a normal Windows desktop session."); }
+            note("Instance lock acquired");
+        }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = OleInitialize(None);
-        let inst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
-        let g = Gfx::new().expect("graphics");
-        let store = Store::open().expect("index");
-        let n = Box::leak(Box::new(Notch::new(&g, inst).expect("notch")));
+        let inst: HINSTANCE = startup_result(GetModuleHandleW(None), "Could not identify the application").into();
+        let g = startup_result(Gfx::new(), "Could not initialize Windows graphics");
+        let store = startup_result(Store::open(), "Could not open the preview data folder or index");
+        let n = Box::leak(Box::new(startup_result(Notch::new(&g, inst), "Could not create the ledge UI")));
         let a = Box::leak(Box::new(App {
             g,
             store,
@@ -1243,7 +1395,8 @@ fn main() {
             seen: 0,
             quitting: false,
             interval: None,
-            login: login_on(),
+            scroll_pdf_stop: None,
+            login: !scroll_pdf_preview() && login_on(),
             outgoing: Vec::new(),
             count: 0,
             overlay: None,
@@ -1255,12 +1408,21 @@ fn main() {
         {
             let (a, n) = (&mut *ap, &mut *np);
             a.register();
-            let _ = AddClipboardFormatListener(a.main);
+            if !scroll_pdf_preview() { let _ = AddClipboardFormatListener(a.main); }
             SetTimer(Some(a.main), T_TICK, 1500, None);
             SetTimer(Some(a.main), T_HOURLY, 3_600_000, None);
             SetTimer(Some(a.main), T_TRIM, 4000, None);
             n.adapt(&a.g, desk_open());
             n.start();
+            if preview {
+                // Draw before telling the user it's ready; a successful launch
+                // never relies on noticing the normal 9-pixel collapsed strip.
+                if let Err(err) = n.draw_at(a, Instant::now()) { composition_failed(err); }
+                note("Ready: ledge initialized");
+                let _ = MessageBoxW(None,
+                    w!("Preview is ready.\n\nHover or click the ledge at the top center of your primary screen, then choose + > Scroll to PDF.\n\nThis preview does not add a tray icon."),
+                    w!("Ledge Grab Scroll to PDF Preview"), MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+            }
         }
         let mut msg = MSG::default();
         let mut trace = FrameTrace::start();
@@ -1293,16 +1455,16 @@ fn main() {
                     if draw_overlay {
                         // Submit both surfaces from the same animation sample, with
                         // at most one vsynced Present (the last surface submitted).
-                        if o.draw_at(&a.g, now, !draw_notch).is_err() {
-                            restart();
+                        if let Err(err) = o.draw_at(&a.g, now, !draw_notch) {
+                            composition_failed(err);
                         }
                     }
                     a.overlay = Some(o);
                 }
             }
             if draw_notch {
-                if n.draw_at(a, now).is_err() {
-                    restart();
+                if let Err(err) = n.draw_at(a, now) {
+                    composition_failed(err);
                 }
             }
             if let Some(trace) = &mut trace {

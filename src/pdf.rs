@@ -1,4 +1,4 @@
-//! PNGs to PDF, one page each at its own size, pixels copied without re-encoding.
+//! PNGs to PDF, using original image data where possible.
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref};
 use std::path::PathBuf;
 
@@ -42,6 +42,25 @@ pub fn merge(files: &[PathBuf]) -> Option<Vec<u8>> {
     if pages.len() != files.len() || pages.is_empty() {
         return None;
     }
+    write_pages(pages, false)
+}
+
+/// Split an image-only scroll capture into printable Letter pages.
+pub fn scroll_pages(frame: &crate::capture::Frame) -> Option<(Vec<u8>, usize)> {
+    let width = usize::try_from(frame.w).ok()?;
+    let rows = crate::scroll_pdf_core::page_ranges(&frame.px, width);
+    let count = rows.len();
+    let pages: Option<Vec<Png>> = rows.into_iter().map(|r| {
+        let page = crate::capture::Frame {
+            w: frame.w, h: r.len() as i32, px: frame.px[r.start * width * 4..r.end * width * 4].to_vec(),
+        };
+        parse(&crate::store::encode_png(&page))
+    }).collect();
+    Some((write_pages(pages?, true)?, count))
+}
+
+fn write_pages(pages: Vec<Png>, letter: bool) -> Option<Vec<u8>> {
+    if pages.is_empty() { return None; }
     let mut pdf = Pdf::new();
     let (cat, tree) = (Ref::new(1), Ref::new(2));
     let id = |n: usize, k: i32| Ref::new(3 + n as i32 * 3 + k);
@@ -49,14 +68,21 @@ pub fn merge(files: &[PathBuf]) -> Option<Vec<u8>> {
     pdf.pages(tree).kids((0..pages.len()).map(|n| id(n, 0))).count(pages.len() as i32);
     for (n, p) in pages.iter().enumerate() {
         // 96 px per inch
-        let (w, h) = (p.w as f32 * 0.75, p.h as f32 * 0.75);
+        let (page_w, page_h, x, y, w, h) = if letter {
+            let w = 540.0f32;
+            let h = w * p.h as f32 / p.w as f32;
+            (612.0, 792.0, 36.0, 756.0 - h, w, h)
+        } else {
+            let (w, h) = (p.w as f32 * 0.75, p.h as f32 * 0.75);
+            (w, h, 0.0, 0.0, w, h)
+        };
         let mut page = pdf.page(id(n, 0));
-        page.media_box(Rect::new(0.0, 0.0, w, h)).parent(tree).contents(id(n, 1));
+        page.media_box(Rect::new(0.0, 0.0, page_w, page_h)).parent(tree).contents(id(n, 1));
         page.resources().x_objects().pair(Name(b"I"), id(n, 2));
         page.finish();
         let mut c = Content::new();
         c.save_state();
-        c.transform([w, 0.0, 0.0, h, 0.0, 0.0]);
+        c.transform([w, 0.0, 0.0, h, x, y]);
         c.x_object(Name(b"I"));
         c.restore_state();
         pdf.stream(id(n, 1), &c.finish());
@@ -100,6 +126,21 @@ mod tests {
             std::fs::write(keep, &out).unwrap();
         }
         assert!(super::merge(&[dir.join("missing.png")]).is_none());
+    }
+
+    #[test]
+    fn scroll_pdf_has_letter_pages_and_preserves_the_last_rows() {
+        let mut frame = Frame::new(300, 905);
+        frame.px.chunks_exact_mut(4).enumerate().for_each(|(i, p)| {
+            let level = (i as u8).wrapping_mul(17);
+            p.copy_from_slice(&[level, level, level, 255]);
+        });
+        let (pdf, count) = super::scroll_pages(&frame).unwrap();
+        assert_eq!(count, 3);
+        let raw = String::from_utf8_lossy(&pdf);
+        assert_eq!(raw.matches("[0 0 612 792]").count(), 3);
+        assert!(raw.contains("/Height 105"));
+        assert!(super::scroll_pages(&Frame::new(0, 0)).is_none());
     }
 
     #[test]

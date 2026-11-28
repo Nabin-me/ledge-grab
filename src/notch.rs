@@ -59,6 +59,9 @@ pub enum View {
     Done,
     /// Recording a clip.
     Rec,
+    PdfScroll,
+    PdfSaved(i64, bool),
+    PdfError(&'static str, &'static str),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -80,6 +83,9 @@ pub enum Btn {
     Go(Mode),
     Stop,
     StopRec,
+    StopPdf,
+    OpenPdf(i64),
+    DismissPdfError,
     Filter(usize),
     BackToApps,
     Settings,
@@ -243,9 +249,11 @@ pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
             let w = PAD * 2.0 + COLS as f32 * TILE.0 + (COLS - 1) as f32 * GAP;
             (w, PAD + rows * (TILE.1 + GAP) + BAR, 28.0)
         }
-        View::Menu => (424.0, PAD * 2.0 + 7.0 * 38.0 + 4.0, 28.0),
+        View::Menu => (424.0, PAD * 2.0 + 8.0 * 38.0 + 4.0, 28.0),
         View::Settings => (400.0, PAD * 2.0 + 11.0 * SETTINGS_ROW + 40.0, 28.0),
         View::Rec => (118.0, 36.0, 16.0),
+        View::PdfScroll | View::PdfSaved(..) => (232.0, 40.0, 18.0),
+        View::PdfError(..) => (390.0, 68.0, 18.0),
         View::Flash(_) => (TILE.0 + PAD * 2.0, 116.0, 26.0),
         View::Count(_) | View::Done => {
             let _ = g;
@@ -536,6 +544,17 @@ impl Notch {
         }
     }
 
+    pub fn pdf_error(&mut self, g: &Gfx, st: &Store, title: &'static str, hint: &'static str) {
+        crate::note(&format!("Scroll PDF: {title} | {hint}"));
+        self.hide(false);
+        self.show(g, st, View::PdfError(title, hint));
+    }
+
+    pub fn pdf_saved(&mut self, g: &Gfx, st: &Store, id: i64, partial: bool) {
+        self.show(g, st, View::PdfSaved(id, partial));
+        unsafe { SetTimer(Some(self.sensor), T_FLASH, 5000, None); }
+    }
+
     pub fn done(&mut self, g: &Gfx, st: &Store) {
         self.show(g, st, View::Done);
         unsafe {
@@ -646,6 +665,7 @@ impl Notch {
             (Mode::All, "All screens"),
             (Mode::Last, "Last region"),
             (Mode::Scroll, "Scrolling"),
+            (Mode::ScrollPdf, "Scroll to PDF"),
             (Mode::Delay, "Delay"),
         ]
         .map(|(m, t)| (Btn::Go(m), t))
@@ -734,7 +754,7 @@ impl Notch {
             View::Menu => {
                 let cw = (w - PAD * 2.0 - 8.0) / 2.0;
                 for (n, (k, _)) in Self::menu(app.interval.is_some(), app.rec.is_some()).into_iter().enumerate() {
-                    let (col, row) = (n / 7, n % 7);
+                    let (col, row) = (n / 8, n % 8);
                     b(&mut v, k, R::new(PAD + col as f32 * (cw + 8.0), PAD + row as f32 * 38.0, cw, 36.0));
                 }
             }
@@ -757,6 +777,9 @@ impl Notch {
                 b(&mut v, Btn::Quit, R::new(right - 68.0, fy, 68.0, 32.0));
             }
             View::Rec => b(&mut v, Btn::StopRec, R::new(0.0, 0.0, w, h)),
+            View::PdfScroll => b(&mut v, Btn::StopPdf, R::new(8.0, 4.0, w - 16.0, h - 8.0)),
+            View::PdfSaved(id, _) => b(&mut v, Btn::OpenPdf(id), R::new(8.0, 4.0, w - 16.0, h - 8.0)),
+            View::PdfError(..) => b(&mut v, Btn::DismissPdfError, R::new(0.0, 0.0, w, h)),
             _ => {}
         }
         v
@@ -993,6 +1016,19 @@ impl Notch {
                     c.circle(r.cx(), r.cy(), 5.0, RED, 0.65 + 0.35 * (t * std::f32::consts::PI).cos().abs());
                 }
                 c.text_w(&clock(s), R::new(0.0, 0.0, w - 18.0, h), 14.0, 600, INK, 1.0, Align::Right);
+            }
+            View::PdfScroll => {
+                let label = if app.scroll_pdf_stopping() { "Saving PDF…" } else { "Scroll to PDF   ·   Stop & Save" };
+                pill(Btn::StopPdf, label, INK);
+            }
+            View::PdfSaved(id, partial) => {
+                pill(Btn::OpenPdf(id), if partial { "Partial PDF saved   ·   Open" } else { "PDF saved   ·   Open" }, INK);
+            }
+            View::PdfError(title, hint) => {
+                c.circle(19.0, 23.0, 4.0, RED, 1.0);
+                c.text_w(title, R::new(31.0, 10.0, w - 48.0, 24.0), 14.0, 650, INK, 1.0, Align::Left);
+                c.text(hint, R::new(18.0, 32.0, w - 38.0, 22.0), 12.0, DIM, 1.0, Align::Left);
+                c.text("×", R::new(w - 27.0, 8.0, 21.0, 22.0), 15.0, DIM, 1.0, Align::Center);
             }
             View::Flash(id) => {
                 let dy = match self.captured {
@@ -1584,7 +1620,7 @@ impl Notch {
             View::Count(_) => return,
             _ => {}
         }
-        if self.view == View::Rec {
+        if matches!(self.view, View::Rec | View::PdfScroll | View::PdfSaved(..) | View::PdfError(..)) {
             let h = self.hit(app, x, y);
             self.set_hover(h);
             return;
@@ -1645,7 +1681,7 @@ impl Notch {
         let transition = match id {
             T_DWELL => self.open_dwell.poll(Instant::now()),
             T_LEAVE => self.close_grace.poll(Instant::now()),
-            T_FLASH if matches!(self.view, View::Flash(_) | View::Done) => {
+            T_FLASH if matches!(self.view, View::Flash(_) | View::Done | View::PdfSaved(..)) => {
                 self.show(&app.g, &app.store, View::Rest);
                 return false;
             }
@@ -1687,7 +1723,7 @@ impl Notch {
         self.just_opened_app = false;
         self.mouse = self.local(l);
         self.cancel_open();
-        if !self.expanded() && self.view != View::Rec {
+        if !self.expanded() && !matches!(self.view, View::Rec | View::PdfScroll | View::PdfSaved(..) | View::PdfError(..)) {
             if matches!(self.view, View::Rest | View::Flash(_)) {
                 self.show(&app.g, &app.store, View::Peek);
             }
@@ -1964,6 +2000,12 @@ impl Notch {
                 app.stop_rec(self);
                 self.show(&app.g, &app.store, View::Rest);
             }
+            Btn::StopPdf => app.stop_scroll_pdf(self),
+            Btn::DismissPdfError => self.show(&app.g, &app.store, View::Rest),
+            Btn::OpenPdf(id) => {
+                if let Some(path) = app.file(id) { crate::clip::open_file(&path); }
+                self.show(&app.g, &app.store, View::Rest);
+            }
             Btn::Quit => app.quit(self),
             Btn::Key(n) => app.record_key(self, n),
             Btn::Folder => unsafe {
@@ -1983,6 +2025,7 @@ impl Notch {
                 app.store.save_settings();
             }
             Btn::Login => {
+                if crate::scroll_pdf_preview() { return self.fail(); }
                 app.login = !app.login;
                 crate::set_login(app.login);
             }
