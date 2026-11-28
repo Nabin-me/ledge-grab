@@ -37,6 +37,8 @@ Write-Host "==> Building $AppName v$Version (binary: $BinName.exe)" -ForegroundC
 if (-not $SkipCargoBuild) {
     Push-Location $RepoRoot
     try {
+        # Release builds update themselves; local `cargo build`s never do (src/update.rs).
+        $env:LEDGE_GRAB_UPDATES = "1"
         cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
     } finally {

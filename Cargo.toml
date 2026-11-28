@@ -1,6 +1,6 @@
 [package]
 name = "ledge-grab"
-version = "0.1.1"
+version = "0.1.2"
 description = "Screenshots that live on the ledge."
 license = "MIT"
 repository = "https://github.com/Nabin-me/ledge-grab"
@@ -14,9 +14,13 @@ png = "0.18"
 regex-lite = "0.1"
 pdf-writer = "0.15"
 rusqlite = { version = "0.43", features = ["bundled"] }
+ed25519-dalek = "2"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
   "Foundation", "Foundation_Collections", "Foundation_Numerics",
@@ -29,14 +33,23 @@ features = [
   "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange",
   "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance",
   "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading",
-  "Win32_Media_MediaFoundation", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture",
+  "Win32_Media_MediaFoundation", "Win32_Networking_WinHttp", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture",
   "Win32_System_ProcessStatus", "Win32_UI_Accessibility",
   "Win32_UI_HiDpi", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell",
   "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging",
 ]
 
-[build-dependencies]
+[target.'cfg(not(target_os = "linux"))'.build-dependencies]
 winresource = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+tiny-skia = "0.11"
+ab_glyph = "0.2"
+x11rb = { version = "0.13", features = ["randr"] }
 
 [profile.release]
 opt-level = 3

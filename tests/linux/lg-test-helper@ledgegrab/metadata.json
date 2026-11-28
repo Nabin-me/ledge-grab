@@ -1,0 +1,1 @@
+{"uuid": "lg-test-helper@ledgegrab", "name": "Ledge Grab test helper", "description": "Closes the startup overview in headless test sessions.", "shell-version": ["46"]}

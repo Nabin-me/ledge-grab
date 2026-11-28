@@ -1,7 +1,7 @@
 //! Hiding pixels for good. Everything under a patch is replaced by a handful of
 //! jittered averages; the original values are not recoverable from the result.
-use crate::capture::{Frame, inside};
-use windows::Win32::Foundation::{POINT, RECT};
+use crate::frame::{Frame, inside};
+use crate::geom::{POINT, RECT};
 
 fn rng(s: &mut u32) -> u32 {
     *s ^= *s << 13;
@@ -19,7 +19,7 @@ fn seed() -> u32 {
 
 /// Overwrite `r` (frame pixels). Returns what was there, for undo.
 pub fn apply(f: &mut Frame, r: RECT, smooth: bool) -> Option<(RECT, Frame)> {
-    let r = crate::capture::intersect(&r, &RECT { left: 0, top: 0, right: f.w, bottom: f.h })?;
+    let r = crate::frame::intersect(&r, &RECT { left: 0, top: 0, right: f.w, bottom: f.h })?;
     let before = f.crop(r);
     let (w, h) = (before.w, before.h);
     // At most three blocks over a line of text: too coarse to hold a letter.
@@ -147,7 +147,7 @@ fn plane(v: &[(f32, f32, f32)]) -> Option<[f32; 3]> {
 
 /// `depth` is below zero inside the area, and the distance to it outside.
 fn fill(f: &mut Frame, b: RECT, depth: impl Fn(i32, i32) -> f32, seed: Option<[f32; 3]>) -> Option<(RECT, Frame)> {
-    let b = crate::capture::intersect(&b, &RECT { left: 0, top: 0, right: f.w, bottom: f.h })?;
+    let b = crate::frame::intersect(&b, &RECT { left: 0, top: 0, right: f.w, bottom: f.h })?;
     let mut ring: Vec<(f32, f32, [f32; 3])> = Vec::new();
     let mut hole = Vec::new();
     for y in b.top..b.bottom {

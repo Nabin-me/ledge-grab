@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>PASTE TARGET READY</title>
+<!-- Sequential Copy check: each image paste is decoded and its colour recorded in the title.
+     Red = A, green = B, blue = C. Used by tests/queue_e2e.ps1; also handy by hand. -->
+<style>body{margin:0;font:16px system-ui;background:#f4f4f4}#ed{margin:24px;height:70vh;border:2px dashed #888;padding:12px;overflow:auto;background:white}
+#ed img{max-width:160px;margin:4px;border:1px solid #ccc}#log{margin:0 24px;font:14px monospace}</style>
+<div id="ed" contenteditable="true">Click here, then paste images.</div>
+<div id="log"></div>
+<script>
+const seen = [];
+const name = ([r, g, b]) => r > 200 && g < 80 && b < 80 ? 'A' : g > 200 && r < 80 && b < 80 ? 'B' : b > 200 && r < 80 && g < 80 ? 'C' : `?${r}.${g}.${b}`;
+const show = () => { document.title = 'PASTES:' + seen.join(','); document.querySelector('#log').textContent = document.title; };
+document.addEventListener('paste', e => {
+  e.preventDefault();
+  // Reserve the slot now: decoding is async and must not reorder results.
+  const at = seen.push('…') - 1;
+  const item = [...e.clipboardData.items].find(i => i.type.startsWith('image/'));
+  if (!item) { seen[at] = 'none'; return show(); }
+  const file = item.getAsFile();
+  createImageBitmap(file).then(bmp => {
+    const c = new OffscreenCanvas(bmp.width, bmp.height), x = c.getContext('2d');
+    x.drawImage(bmp, 0, 0);
+    seen[at] = name(x.getImageData(4, 4, 1, 1).data);
+    const img = document.createElement('img'); img.src = URL.createObjectURL(file); document.querySelector('#ed').append(img);
+    show();
+  }, () => { seen[at] = 'bad'; show(); });
+  show();
+});
+</script></html>

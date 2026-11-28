@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Ledge Grab Scroll to PDF Windows test</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eef1f4;color:#202a33;font:16px/1.45 system-ui}main{max-width:760px;margin:68px auto 0;padding:0 20px}h1{margin:0 0 6px;font-size:25px}p{margin:0 0 12px}button{cursor:pointer;padding:8px 13px;border:1px solid #a1acba;border-radius:6px;background:white;color:inherit;font:inherit}#pane{margin-top:12px;height:min(52vh,460px);min-height:265px;max-height:460px;overflow-y:scroll;border:1px solid #9fa; background:#fcfcfc;scroll-behavior:auto;overscroll-behavior:contain}article{margin:12px 24px;padding:9px 15px;border:1px solid #cdd9e3;border-radius:7px;background:#e9f0f7}article:nth-child(2n){background:#f5f0df}strong{display:block}#end{margin:15px 24px;padding:15px;background:#d7f3e0;font-weight:bold}
+</style>
+<main><h1>Scroll to PDF test fixture</h1>
+<p>Open on Windows. Jump to message 06, then capture the scrolling pane only. Exclude the outer border and scrollbar. Keep the window still and don’t move the mouse during capture.</p>
+<button type="button" id="jump">Start at message 06</button>
+<button type="button" id="reset">Reset to top</button>
+<div id="pane" tabindex="0" aria-label="Test conversation">
+<div id="end">END OF TEST THREAD</div>
+</div></main>
+<script>
+const pane=document.querySelector('#pane'),end=document.querySelector('#end');
+const subjects=['Placement notes','Deliverable review','Handoff detail','Change request','Approved wording','Source check','Schedule decision','Release blocker','File format','Color notes','Viewport test','Playback detail','Final verification','Next owner'];
+for(let n=1;n<=26;n++){
+ const article=document.createElement('article'),title=document.createElement('strong'),body=document.createElement('span');
+ const id=String(n).padStart(2,'0');article.id='message-'+id;title.textContent='MESSAGE '+id+' / '+subjects[(n-1)%subjects.length];
+ body.textContent='Scenario '+String(511+n*427)+'. '+['The current draft stays unchanged until the next review.','See the visible seam marker before approving the write.','Use the attached note to confirm the status of this sample.','Keep the readout short and report the limits of the check.'][n%4];
+ article.append(title,body);end.before(article);
+}
+document.querySelector('#jump').onclick=()=>{pane.scrollTop=document.querySelector('#message-06').offsetTop-pane.offsetTop;pane.focus({preventScroll:true});};
+document.querySelector('#reset').onclick=()=>{pane.scrollTop=0;pane.focus({preventScroll:true});};
+</script></html>

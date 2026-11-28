@@ -526,6 +526,29 @@ impl Canvas<'_> {
         }
     }
 
+    /// Opacity-only grouping for live UI transitions. Direct2D manages the
+    /// layer resource; no command list or Gaussian blur graph per frame.
+    pub fn fade(&self, bounds: R, alpha: f32, draw: impl FnOnce(&Canvas)) {
+        if alpha <= 0.004 {
+            return;
+        }
+        if alpha > 0.996 {
+            return draw(self);
+        }
+        let parameters = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: bounds.d2d(),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: alpha,
+            ..Default::default()
+        };
+        unsafe {
+            self.ctx.PushLayer(&parameters, None::<&ID2D1Layer>);
+            draw(self);
+            self.ctx.PopLayer();
+        }
+    }
+
     /// Draw content through a blur and an opacity. Cheap when both are at rest.
     pub fn layer(&self, blur: f32, alpha: f32, draw: impl FnOnce(&Canvas)) {
         if alpha <= 0.004 {

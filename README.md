@@ -50,6 +50,8 @@ Grab the latest Windows x64 build from [**GitHub Releases**](https://github.com/
 
 Verify downloads anytime against `SHA256SUMS.txt` attached to every release.
 
+**Updates:** Ledge Grab keeps itself up to date. It checks GitHub Releases shortly after it starts and then every 10 minutes. When a new version is out, it downloads it, verifies it, and installs it the next time nothing is in progress (no recording, Sequential Copy or Scroll to PDF running, shelf closed). The ledge restarts in about a second and says which version you're on. Installed copies run the new installer silently; portable copies replace their own exe. Copies installed for all users (admin installs) don't update themselves. See [docs/auto-update.md](docs/auto-update.md).
+
 **Uninstall:** Open **Windows Settings → Apps → Installed apps → Ledge Grab → Uninstall** (or delete the extracted folder for the portable build). Uninstalling removes the app, shortcuts, and startup entry while keeping your saved screenshots in `Pictures\Ledge Grab`.
 
 ## Seal what's private
@@ -72,12 +74,14 @@ Press `B` and Ledge Grab automatically outlines emails, card numbers, phone numb
 |---|---|
 | **Hover the ledge** | Pause over the top-edge badge to peek at your last three shots, or click the badge to open immediately. Click a capture to copy it. |
 | **`+`** | Every capture mode at a glance. |
-| **`⌄`** | Expand the shelf to browse everything you captured this week. |
-| **`⚙`** | Open Settings directly from the ledge (hotkeys, folder, retention, copied images, launch at login, quit). |
+| **`⌄`** | Expand the shelf to browse your capture history. |
+| **Folder icon** | Open your on-disk capture folder in Explorer. A tiny dot means save-only is on. |
+| **`⚙`** | Open Settings directly from the ledge (hotkeys, folder, retention, copied images, save-only, launch at login, quit). |
 | **Drag a tile out** | Drops the actual file directly into Slack, Discord, browsers, or any app. |
 | **Drop a tile on another** | Stacks related shots together. |
-| **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, paste queue, stack, or convert a clip to GIF. |
-| **All · Clips · App folders** | Browse all captures, view clips, or browse by app. Hover a folder to fan its file cards; click it to open. Use Back or `Esc` to return. |
+| **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, Sequential Copy, stack, or convert a clip to GIF. |
+| **All · Clips · App folders · Hidden** | Browse visible captures, clips, by app, or hidden screenshots. Click a folder icon to browse that app; Back or `Esc` returns to folders. |
+| **Hide / Show** | Select a screenshot in the shelf and use Hide. In Hidden, select a screenshot and use Show to restore its normal visibility. Neither action moves or deletes a file. |
 | **Ledge shortcuts** | While the ledge is open: `Ctrl`+`A` select all, `Shift`+Click range select, `Ctrl`+`C` copy selected, `Del` delete selected, `P` pin/unpin, `Ctrl`+`D` deselect, `Ctrl`+`,` settings, `Esc` back/close. |
 
 Shots roll off the ledge after seven days unless pinned. The files stay in your save folder. New captures are saved by local calendar day, then source app, for example:
@@ -86,10 +90,22 @@ Shots roll off the ledge after seven days unless pinned. The files stay in your 
 Pictures\Ledge Grab\2026-11-25\Notepad\2026-11-25 14.30.52.017 1.png
 ```
 
-Existing files stay in their original locations and remain accessible through history. The shelf's **App folders** view collects each app's visible captures across dates. The shelf stays open while you use it and briefly after the pointer leaves, so a quick slip off an edge won't close it.
+Existing files stay in their original locations. In Settings, **Save screenshots without preview** keeps new screenshots off the peek and skips the thumbnail pop-up while keeping the normal save and copy behavior. Use **Hidden** to find or restore them before they age out of history, or open the save folder at any time. This switch does not hide older visible screenshots retroactively or alter video recordings.
+
+New shortcuts are active only while the ledge is open and the pointer is over it:
+
+| Shortcut | Action |
+|---|---|
+| `H` | Hide selected or hovered screenshots; show them again when viewing Hidden |
+| `Ctrl`+`H` | Open Hidden |
+| `Ctrl`+`Shift`+`H` | Toggle save-only for future screenshots |
+| `Ctrl`+`O` | Open the capture folder in Explorer |
+| `Ctrl`+`1` / `2` / `3` | Open All / Clips / App folders |
+
+The shelf's **App folders** view collects each app's visible captures across dates. The shelf stays open while you use it and briefly after the pointer leaves, so a quick slip off an edge won't close it.
 
 - **Float** pins any capture above all windows — drag to move, scroll to resize, `Ctrl` + scroll to fade opacity, right-click to close.
-- **Queue** pastes your selected picks in order, advancing automatically on every `Ctrl` + `V`.
+- **Sequential Copy** puts your selected screenshots on the clipboard one at a time, in shelf order. Each `Ctrl` + `V` pastes the next one, even when pressed quickly. The ledge shows a small preview of the image on the clipboard and "Next 1 of 3". If a paste isn't picked up, it stops and offers **Next** instead of skipping. Copying something else ends the queue. The collapsed ledge shows a dot for each of your newest visible screenshots (up to five, then +). Brighter dots are more recent.
 - **Copied images** optionally keeps images copied from other apps right on the ledge (copied text is never stored). Anything marked private by other apps is ignored, and you can toggle it anytime in Settings.
 
 ## Capture
@@ -174,7 +190,8 @@ To build the Windows Setup installer (`Inno Setup 6`), portable ZIP, and checksu
 
 ## Privacy & Verification
 
-- **Zero network, zero telemetry:** Ledge Grab makes no outbound network requests and includes no analytics, crash uploaders, or closed-source components. Every screenshot, clip, OCR scan, and redaction stays strictly on your machine, and copied text is never recorded.
+- **No telemetry:** Ledge Grab's only network request is the update check, which downloads a small signed file from GitHub Releases. GitHub sees your IP address and the Ledge Grab version, nothing else. There are no analytics, crash uploaders, or closed-source components. Every screenshot, clip, OCR scan, and redaction stays on your machine, and copied text is never recorded. To turn the update check off, set the environment variable `LEDGE_GRAB_NO_AUTO_UPDATE=1`.
+- **Signed updates:** Each release's update manifest is signed with an ed25519 key held only by the release pipeline. The app refuses an update unless the signature matches the public key built into it, the version is newer, and the file's size and SHA-256 match.
 - **Transparent builds:** Licensed under the [MIT License](LICENSE). Official releases are compiled directly from this public repository via GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) and ship with `SHA256SUMS.txt` checksums.
 - **Note on Windows SmartScreen:** Because builds are currently unsigned, Windows SmartScreen may show a warning on first run — click **More info → Run anyway**, or build directly from source with `cargo build --release`.
 
