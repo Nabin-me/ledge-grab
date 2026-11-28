@@ -1514,15 +1514,17 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
             // Which app asked: a process name only, for diagnosing early readers.
             let reader = reader_win.map(capture::app_name).unwrap_or_default();
             // Clipboard monitors (Mouse Without Borders, sync tools) read every new
-            // image at once. Rendering for them would cache the data, and the real
-            // paste would then never reach us. While no paste is pending, a read from
-            // a background process gets nothing and the promise stays open.
+            // image at once, and can read again while a paste is pending. Rendering
+            // for them would cache the data so the real paste never reaches us, or
+            // count their read as the paste and skip an image. While Sequential Copy
+            // runs, a read from a background process gets nothing and the promise
+            // stays open for the app that was pasted into.
             let background = reader_win.is_some_and(|w| {
                 let pid = window_pid(w);
                 pid != 0 && pid != unsafe { GetCurrentProcessId() } && pid != window_pid(unsafe { GetForegroundWindow() })
             });
-            if background && with_queue(|q| !q.waiting()).unwrap_or(false) {
-                note(&format!("queue declined early read format {format} by '{reader}'"));
+            if background && with_queue(|_| ()).is_some() {
+                note(&format!("queue declined background read format {format} by '{reader}'"));
                 return LRESULT(0);
             }
             if let Some(b) = a.png.as_ref().and_then(|p| p.bytes(format)) {

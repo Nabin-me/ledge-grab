@@ -202,8 +202,11 @@ function Paste-Chord([int]$times, [int]$gapMs) {
     [Drv]::Tap($VK.CTRL, $true)
 }
 
-# Close every Edge started with a throwaway lg-edge-* profile and delete those profiles.
+# Close every Edge started with a throwaway lg-edge-* profile and delete those profiles,
+# and any WinForms paste target left by an earlier run.
 function Stop-TestEdge {
+    Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "powershell.exe" -and $_.CommandLine -like "*winforms_target.ps1*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "msedge.exe" -and $_.CommandLine -like "*lg-edge-*" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 800

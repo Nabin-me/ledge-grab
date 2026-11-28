@@ -128,11 +128,6 @@ impl Queue {
         }
     }
 
-    /// A paste key has gone out and its read hasn't arrived yet.
-    pub fn waiting(&self) -> bool {
-        matches!(self.phase, Phase::Pressed(_))
-    }
-
     /// An app asked for the current image's data.
     pub fn read(&mut self) -> Then {
         match self.phase {

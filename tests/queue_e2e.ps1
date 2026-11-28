@@ -213,6 +213,7 @@ function Scenario-FailedSave {
     } finally { Stop-Ledge $l; Copy-Item (Join-Path $l.Data "log.txt") (Join-Path $Out "failsave-ledge-log.txt") -ErrorAction SilentlyContinue }
 }
 
+Stop-TestEdge
 $all = "EdgeRapid", "WinForms", "Spaced", "StallAndNext", "Missing", "ReplacedElsewhere", "FailedSave"
 foreach ($s in $all) {
     if ($Only.Count -and $Only -notcontains $s) { continue }
