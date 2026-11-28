@@ -1,6 +1,6 @@
 # Scroll to PDF Windows prototype
 
-This is a local prototype based on the released Windows v0.1.2 source. It does not change standard Scrolling, the shelf count, or the paste queue. It is not a replacement for the Windows installer.
+This is a local prototype based on the released Windows v0.1.2 source. It is not a replacement for the Windows installer.
 
 ## Run the test
 
@@ -14,7 +14,21 @@ This is a local prototype based on the released Windows v0.1.2 source. It does n
 
 One normal Windows window, one stable pane with overlapping downward scroll steps, image-only US Letter pages, and local export. It looks for a clear pixel match and cuts pages near quiet rows when possible; it does not understand message boundaries. It stops after repeated lack of visible movement, not after reading the app's scrollbar API. It does not capture history above the starting position. Infinite loading, animation, multiple panes and apps that cause large scroll jumps may produce a partial result. Limits: 60 seconds of scrolling, 180 steps, and bounded screenshot dimensions. Select only content you intend to save.
 
-The Windows x64 executable was cross-compiled on Linux. Native Windows focus, wheel injection, stop controls and output still require a desktop smoke test. The included sample PDF is from synthetic, overlapping chat frames run through the same Rust overlap and PDF code, not from a live Windows window. The source patch is based on tag v0.1.2; current main has a different history.
+## Windows desktop results
+
+Checked on a native Windows 11 desktop (build 26300) with `tests/scroll_pdf_e2e.ps1`, which drives Edge and the preview build with real mouse and wheel input:
+
+- Startup with no other Ledge Grab: **Preview is ready**, ledge stays up.
+- Startup while another instance runs: the **already running** message, exit code 2, and `preview-launch.log` records the stop.
+- `scroll_pdf_fixture.html` from message 06: one complete PDF, messages 06 to 26 in order, no duplicates or gaps, ending at **END OF TEST THREAD**.
+- Esc mid-run: partial PDF, reason `UserStopped`.
+- A window placed over the pane mid-run: partial PDF, reason `PaneCovered`.
+- Moving the browser window mid-run: partial PDF, reason `TargetChanged`.
+- `scroll_pdf_repeat.html` (identical rows): partial PDF, reason `NoSafeOverlap`.
+
+Not yet checked on Windows: a real chat app pane, Stop & Save from the ledge button (Esc and the stop flag share one path), high-DPI or multi-monitor setups, and the packaged `Start Preview.cmd` launcher.
+
+The launch log ends each run with one line such as `Scroll PDF ended: wheel=16 reason=NoMoreMovement rows=2131`. `wheel=0` means the run stopped before the first scroll.
 
 ## If it does not open
 
