@@ -5,7 +5,9 @@ mod capture;
 mod clip;
 mod float;
 mod gfx;
+mod keys;
 mod notch;
+mod paste_queue;
 mod ocr;
 mod overlay;
 mod pdf;
@@ -49,6 +51,12 @@ const WM_KEY: u32 = WM_APP + 4;
 pub const WM_PICK_FOLDER: u32 = WM_APP + 5;
 const WM_PASTED: u32 = WM_APP + 6;
 const WM_NOTCH_KEY: u32 = WM_APP + 7;
+/// A Sequential Copy step to run outside WM_RENDERFORMAT; wparam is a `Then`.
+const WM_QUEUE_STEP: u32 = WM_APP + 8;
+/// Replay one paste held back while the next image was placed.
+const WM_REPLAY: u32 = WM_APP + 9;
+/// Marks our own replayed keystrokes.
+const REPLAY_TAG: usize = 0x4C47_5150; // "LGQP"
 
 // Give motion a chance under a continuous stream of pointer/keyboard messages.
 // A single handler can still exceed the budget; never interrupt one mid-dispatch.
@@ -65,10 +73,13 @@ const T_TRIM: usize = 8;
 const T_CLIP: usize = 9;
 const T_PASTE: usize = 10;
 pub const T_REC: usize = 11;
+const T_QUEUE_RETRY: usize = 12;
 
 enum Work {
     Shot(Frame, String),
     Text(String),
+    /// A shot's file write finished.
+    Saved(i64, bool),
     /// What a shot turned out to say.
     Name(i64, String),
     Clip(Option<rec::Clip>),
@@ -84,15 +95,15 @@ pub struct App {
     main: HWND,
     /// Items currently on the clipboard.
     pub clip: Vec<i64>,
-    png: Option<PngSource>,
+    /// Where promised formats of the image on the clipboard come from.
+    /// Always describes the same image as `clip`; see `clip::record`.
+    png: Option<ClipSource>,
     /// Which hotkeys Windows gave us.
     pub hot: [bool; 4],
     pub rec: Option<rec::Rec>,
     /// App the clip is of.
     rec_app: String,
     floats: Vec<Float>,
-    /// Still to be pasted, next first.
-    pub queue: Vec<i64>,
     /// Background jobs the notch shows as one moving line.
     pub jobs: usize,
     /// Last picture another app copied.
@@ -107,18 +118,81 @@ pub struct App {
     last_foreground: HWND,
 }
 
-enum PngSource {
+enum ClipSource {
     Frame(Frame),
     File(PathBuf),
+    /// A Sequential Copy image: every format is rendered on first read.
+    Queued(Frame, PathBuf),
 }
 
-impl PngSource {
-    fn bytes(&self) -> Option<Vec<u8>> {
-        match self {
-            PngSource::Frame(f) => Some(store::encode_png(f)),
-            PngSource::File(p) => std::fs::read(p).ok(),
+impl ClipSource {
+    fn bytes(&self, format: u32) -> Option<Vec<u8>> {
+        use windows::Win32::System::Ole::CF_DIBV5;
+        if format == clip::png_format() {
+            match self {
+                ClipSource::Frame(f) => Some(store::encode_png(f)),
+                ClipSource::File(p) | ClipSource::Queued(_, p) => std::fs::read(p).ok(),
+            }
+        } else if format == CF_DIBV5.0 as u32 {
+            match self {
+                ClipSource::Frame(f) | ClipSource::Queued(f, _) => Some(clip::dibv5(f)),
+                ClipSource::File(p) => read_shot(p).map(|f| clip::dibv5(&f)),
+            }
+        } else {
+            None
         }
     }
+}
+
+/// Sequential Copy state. The paste hook reads it before the target app sees a
+/// key, so it lives outside App. Never held across anything that pumps messages.
+static QUEUE: std::sync::Mutex<Option<paste_queue::Queue>> = std::sync::Mutex::new(None);
+
+fn with_queue<R>(f: impl FnOnce(&mut paste_queue::Queue) -> R) -> Option<R> {
+    QUEUE.lock().ok()?.as_mut().map(f)
+}
+
+fn window_pid(h: HWND) -> u32 {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    pid
+}
+
+/// What the ledge shows while Sequential Copy runs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct QueueView {
+    /// 1-based position of the image on the clipboard.
+    pub pos: usize,
+    pub len: usize,
+    pub current: Option<i64>,
+    pub stall: Option<paste_queue::Stall>,
+}
+
+pub fn queue_view() -> Option<QueueView> {
+    with_queue(|q| {
+        let (pos, len) = q.progress();
+        let stall = match q.phase {
+            paste_queue::Phase::Stalled(s) => Some(s),
+            _ => None,
+        };
+        QueueView { pos, len, current: q.current(), stall }
+    })
+}
+
+fn then_code(t: paste_queue::Then) -> usize {
+    use paste_queue::Then::*;
+    match t {
+        Nothing => 0,
+        Place => 1,
+        Replay => 2,
+        Finished => 3,
+        Retry => 4,
+    }
+}
+
+fn code_then(c: usize) -> paste_queue::Then {
+    use paste_queue::Then::*;
+    [Nothing, Place, Replay, Finished, Retry].get(c).copied().unwrap_or(Nothing)
 }
 
 static APP: AtomicPtr<App> = AtomicPtr::new(std::ptr::null_mut());
@@ -143,6 +217,11 @@ pub fn scroll_pdf_preview() -> bool {
 pub fn testing() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *T.get_or_init(|| std::env::var_os("LEDGE_GRAB_TEST").is_some())
+}
+
+/// Test-only fault injection: make background shot writes fail.
+fn save_should_fail() -> bool {
+    testing() && std::env::var_os("LEDGE_GRAB_FAIL_SAVES").is_some()
 }
 
 /// Timings, only when a test asks for them.
@@ -198,70 +277,134 @@ impl FrameTrace {
 
 impl App {
     /// Put items on the clipboard: a picture for one shot, files otherwise.
-    pub fn copy(&mut self, ids: &[i64]) -> bool {
+    /// `Busy` means the clipboard is unchanged; `Cleared` means it is now empty.
+    pub fn copy(&mut self, ids: &[i64]) -> clip::Set {
         self.end_queue();
         self.put(ids)
     }
 
-    fn put(&mut self, ids: &[i64]) -> bool {
+    fn put(&mut self, ids: &[i64]) -> clip::Set {
         let items: Vec<_> = ids.iter().filter_map(|i| self.store.get(*i)).collect();
         let files: Vec<PathBuf> = items.iter().map(|i| i.path.clone()).collect();
-        let ok = match items.as_slice() {
+        let (r, source) = match items.as_slice() {
             [one] if one.kind == Kind::Shot => {
                 let path = one.path.clone();
                 match read_shot(&path) {
-                    Some(f) => {
-                        let ok = clip::set_image(self.main, &f);
-                        self.png = Some(PngSource::File(path));
-                        ok
-                    }
-                    None => false,
+                    Some(f) => (clip::set_image(self.main, &f, false), Some(ClipSource::File(path))),
+                    // Nothing was touched.
+                    None => (clip::Set::Busy, None),
                 }
             }
-            [] => false,
-            _ => clip::set_files(self.main, &files),
+            [] => (clip::Set::Busy, None),
+            _ => (clip::set_files(self.main, &files), None),
         };
-        if ok {
-            self.clip = ids.to_vec();
-        }
-        ok
+        clip::record(r, &mut self.clip, &mut self.png, ids, source);
+        r
     }
 
-    /// Each paste hands over the next item.
-    pub fn start_queue(&mut self, ids: &[i64]) -> bool {
-        if !self.copy(&ids[..1]) {
-            return false;
+    /// Clipboard holds text now; no item is on it.
+    fn put_text(&mut self, s: &str) -> clip::Set {
+        self.end_queue();
+        let r = clip::set_text(self.main, s);
+        clip::record(r, &mut self.clip, &mut self.png, &[], None);
+        r
+    }
+
+    /// Sequential Copy: `ids` in shelf order; each paste hands over the next.
+    pub fn start_queue(&mut self, ids: &[i64]) -> Result<(), paste_queue::Placed> {
+        self.end_queue();
+        let Some(&first) = ids.first() else { return Err(paste_queue::Placed::Missing) };
+        match self.place_queued(first) {
+            paste_queue::Placed::Ok => {}
+            other => return Err(other),
         }
-        self.queue = ids.to_vec();
+        if let Ok(mut q) = QUEUE.lock() {
+            *q = Some(paste_queue::Queue::new(ids.to_vec()));
+        }
         start_paste_hook();
-        true
+        unsafe {
+            SetTimer(Some(self.main), T_PASTE, 200, None);
+        }
+        Ok(())
+    }
+
+    /// Put one queued image on the clipboard with every format promised.
+    fn place_queued(&mut self, id: i64) -> paste_queue::Placed {
+        use paste_queue::Placed;
+        let Some(item) = self.store.get(id) else { return Placed::Missing };
+        if self.store.is_unsaved(id) {
+            // Still being written: try again shortly rather than call it missing.
+            return Placed::Busy;
+        }
+        let path = item.path.clone();
+        let Some(f) = (item.kind == Kind::Shot).then(|| read_shot(&path)).flatten() else { return Placed::Missing };
+        let r = clip::set_image(self.main, &f, true);
+        clip::record(r, &mut self.clip, &mut self.png, &[id], Some(ClipSource::Queued(f, path)));
+        match r {
+            clip::Set::Ok => Placed::Ok,
+            clip::Set::Busy => Placed::Busy,
+            clip::Set::Cleared => Placed::Cleared,
+        }
+    }
+
+    pub fn stop_queue(&mut self) {
+        self.end_queue();
+    }
+
+    pub fn queue_active(&self) -> bool {
+        QUEUE.lock().is_ok_and(|q| q.is_some())
     }
 
     fn end_queue(&mut self) {
-        self.queue.clear();
+        if let Ok(mut q) = QUEUE.lock() {
+            *q = None;
+        }
         stop_hook(&PASTE_HOOK);
         unsafe {
             let _ = KillTimer(Some(self.main), T_PASTE);
+            let _ = KillTimer(Some(self.main), T_QUEUE_RETRY);
         }
     }
 
-    fn next_in_queue(&mut self, n: &mut Notch) {
-        if self.queue.is_empty() {
-            return;
-        }
-        self.queue.remove(0);
-        // Skip anything that went missing meanwhile.
-        while let Some(id) = self.queue.first().copied() {
-            if self.put(&[id]) {
-                n.repaint();
-                return;
+    /// Carry out what the queue asked for, until it needs to wait.
+    pub fn queue_step(&mut self, n: &mut Notch, mut then: paste_queue::Then) {
+        use paste_queue::{Placed, Then};
+        loop {
+            match then {
+                Then::Nothing => break,
+                Then::Place => {
+                    let Some(id) = with_queue(|q| q.current()).flatten() else { break };
+                    let placed = self.place_queued(id);
+                    if placed == Placed::Missing {
+                        // Never leave the previous, already pasted image to be pasted again.
+                        if clip::clear(self.main).ok() {
+                            clip::record(clip::Set::Cleared, &mut self.clip, &mut self.png, &[], None);
+                        }
+                    }
+                    note(&format!("queue placed {placed:?}"));
+                    then = with_queue(|q| q.placed(placed)).unwrap_or(Then::Nothing);
+                }
+                Then::Replay => {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.main), WM_REPLAY, WPARAM(0), LPARAM(0));
+                    }
+                    break;
+                }
+                Then::Retry => {
+                    unsafe {
+                        SetTimer(Some(self.main), T_QUEUE_RETRY, 120, None);
+                    }
+                    break;
+                }
+                Then::Finished => {
+                    note("queue finished");
+                    self.end_queue();
+                    n.done(&self.g, &self.store);
+                    break;
+                }
             }
-            self.queue.remove(0);
         }
-        self.end_queue();
-        if matches!(n.view, View::Rest) {
-            n.done(&self.g, &self.store);
-        }
+        n.repaint();
     }
 
     /// A file to hand to another app.
@@ -279,7 +422,8 @@ impl App {
         let path = self.store.new_path("pdf", &app).ok()?;
         store::write_file(&path, &bytes).ok()?;
         let id = self.store.add(&path, Kind::Pdf, &thumb, &app, 0).ok()?;
-        self.copy(&[id]);
+        // The PDF exists either way; the shelf shows whether it reached the clipboard.
+        let _ = self.copy(&[id]);
         Some(id)
     }
 
@@ -423,13 +567,15 @@ impl App {
         if !quiet {
             self.end_queue();
         }
-        let on_clip = !quiet && clip::set_image(self.main, &f);
+        let r = if quiet { clip::Set::Busy } else { clip::set_image(self.main, &f, false) };
         note(&format!("clipboard_ms {:.1}", t.elapsed().as_secs_f64() * 1e3));
-        let held = on_clip.then(|| f.clone());
+        // Record now, before indexing can fail, so the PNG promise always follows
+        // the bitmap that is actually on the clipboard.
+        let source = r.ok().then(|| ClipSource::Frame(f.clone()));
+        clip::record(r, &mut self.clip, &mut self.png, &[], source);
         let id = self.keep(f, &app(), !quiet)?;
-        if on_clip {
+        if r.ok() {
             self.clip = vec![id];
-            self.png = held.map(PngSource::Frame);
         }
         note(&format!("indexed_ms {:.1}", t.elapsed().as_secs_f64() * 1e3));
         Some(id)
@@ -443,13 +589,14 @@ impl App {
             post(self.main.0 as isize, Work::Failed);
             return None;
         };
-        let id = self.store.add(&path, Kind::Shot, &thumb, app, 0).ok()?;
+        let id = self.store.add_unsaved(&path, &thumb, app).ok()?;
         let main = self.main.0 as isize;
         std::thread::spawn(move || {
-            let ok = store::write_file(&path, &store::encode_png(&f)).is_ok();
+            let ok = !save_should_fail() && store::write_file(&path, &store::encode_png(&f)).is_ok();
             note(&format!("saved_ms {:.1} {ok}", t.elapsed().as_secs_f64() * 1e3));
+            post(main, Work::Saved(id, ok));
             if !ok {
-                return post(main, Work::Failed);
+                return;
             }
             if named {
                 // The top says what it is; long captures needn't be read whole.
@@ -472,8 +619,11 @@ impl App {
             return;
         }
         if let Some(p) = self.store.rename(id, title) {
-            if self.clip == [id] && matches!(self.png, Some(PngSource::File(_))) {
-                self.png = Some(PngSource::File(p));
+            if self.clip == [id] {
+                match &mut self.png {
+                    Some(ClipSource::File(old) | ClipSource::Queued(_, old)) => *old = p,
+                    _ => {}
+                }
             }
         }
     }
@@ -566,6 +716,7 @@ impl App {
         };
         let stop = Arc::new(AtomicBool::new(false));
         self.scroll_pdf_stop = Some(stop.clone());
+        start_esc_hook();
         let main = self.main.0 as isize;
         note(&format!("Scroll PDF pane: {} × {} physical pixels", region.right - region.left, region.bottom - region.top));
         std::thread::spawn(move || {
@@ -673,8 +824,8 @@ impl App {
             Outcome::Color(c) => {
                 o.refocus();
                 o.close();
-                clip::set_text(self.main, &format!("#{c:06X}"));
-                n.done(&self.g, &self.store);
+                let r = self.put_text(&format!("#{c:06X}"));
+                n.copied_or_not(&self.g, &self.store, r);
             }
             Outcome::Shot(r) => match o.mode {
                 Mode::ScrollPdf => {
@@ -782,6 +933,32 @@ type Hook = AtomicPtr<std::ffi::c_void>;
 static HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
 static PASTE_HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
 static NOTCH_HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
+static ESC_HOOK: Hook = AtomicPtr::new(std::ptr::null_mut());
+
+/// Esc stops Scroll to PDF. Polling the key from the capture thread can miss a
+/// quick tap between samples; this hook sees every press. The key still reaches
+/// the foreground app.
+fn start_esc_hook() {
+    unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+        unsafe {
+            if code >= 0 && (w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN) {
+                let k = &*(l.0 as *const KBDLLHOOKSTRUCT);
+                if k.vkCode == VK_ESCAPE.0 as u32 {
+                    if let Some(stop) = app().and_then(|a| a.scroll_pdf_stop.as_ref()) {
+                        stop.store(true, Relaxed);
+                    }
+                }
+            }
+            CallNextHookEx(None, code, w, l)
+        }
+    }
+    unsafe {
+        stop_hook(&ESC_HOOK);
+        if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
+            ESC_HOOK.store(h.0, Relaxed);
+        }
+    }
+}
 
 fn start_key_hook() {
     stop_hook(&NOTCH_HOOK);
@@ -790,20 +967,9 @@ fn start_key_hook() {
             if code >= 0 && (w.0 as u32 == WM_KEYDOWN || w.0 as u32 == WM_SYSKEYDOWN) {
                 let k = &*(l.0 as *const KBDLLHOOKSTRUCT);
                 let vk = VIRTUAL_KEY(k.vkCode as u16);
-                let modifier = matches!(
-                    vk,
-                    VK_LSHIFT | VK_RSHIFT | VK_LCONTROL | VK_RCONTROL | VK_LMENU | VK_RMENU | VK_LWIN | VK_RWIN
-                );
-                if !modifier {
-                    let down = |v: VIRTUAL_KEY| GetAsyncKeyState(v.0 as i32) < 0;
-                    let mut m = 0;
-                    for (v, bit) in
-                        [(VK_CONTROL, MOD_CONTROL), (VK_SHIFT, MOD_SHIFT), (VK_MENU, MOD_ALT), (VK_LWIN, MOD_WIN)]
-                    {
-                        if down(v) {
-                            m |= bit.0;
-                        }
-                    }
+                if !keys::is_modifier(vk) {
+                    // Either Windows key records as Win.
+                    let m = keys::held_now();
                     if let Some(a) = app() {
                         let _ = PostMessageW(Some(a.main), WM_KEY, WPARAM(m as usize), LPARAM(k.vkCode as isize));
                     }
@@ -821,7 +987,10 @@ fn start_key_hook() {
     }
 }
 
-/// Listens for paste while a queue runs. Never blocks a key.
+/// Listens for paste while Sequential Copy runs. A paste that would land on an
+/// image that hasn't been swapped yet is held back and replayed after the swap;
+/// auto-repeat of a held paste chord is dropped so it can't paste duplicates.
+/// Every other key passes untouched.
 fn start_paste_hook() {
     unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         use std::sync::atomic::AtomicBool;
@@ -829,15 +998,33 @@ fn start_paste_hook() {
         unsafe {
             if code >= 0 {
                 let k = &*(l.0 as *const KBDLLHOOKSTRUCT);
-                let down = |v: VIRTUAL_KEY| GetAsyncKeyState(v.0 as i32) < 0;
                 let vk = VIRTUAL_KEY(k.vkCode as u16);
                 if vk == VK_V || vk == VK_INSERT {
-                    let press = w.0 as u32 == WM_KEYDOWN;
-                    // A held key pastes once.
-                    let repeat = HELD.swap(press, Relaxed) && press;
-                    let mods = if vk == VK_V { down(VK_CONTROL) } else { down(VK_SHIFT) };
-                    if let (true, false, true, Some(a)) = (press, repeat, mods && !down(VK_MENU), app()) {
-                        let _ = PostMessageW(Some(a.main), WM_PASTED, WPARAM(0), LPARAM(0));
+                    let msg = w.0 as u32;
+                    let press = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                    let ours = k.dwExtraInfo == REPLAY_TAG;
+                    let repeat = HELD.swap(press, Relaxed) && press && !ours;
+                    let m = keys::held_now();
+                    let chord = if vk == VK_V {
+                        m & MOD_CONTROL.0 != 0 && m & (MOD_ALT.0 | MOD_WIN.0) == 0
+                    } else {
+                        m & MOD_SHIFT.0 != 0 && m & (MOD_CONTROL.0 | MOD_ALT.0 | MOD_WIN.0) == 0
+                    };
+                    // Our replay sends its own Ctrl when the user already let go.
+                    if press && (chord || ours) {
+                        if repeat {
+                            return LRESULT(1);
+                        }
+                        // try_lock: never wait inside a hook; an unknown state passes the key.
+                        let decision = QUEUE.try_lock().ok().and_then(|mut q| q.as_mut().map(|q| q.key(Instant::now())));
+                        if let Some(a) = app() {
+                            let _ = PostMessageW(Some(a.main), WM_PASTED, WPARAM(0), LPARAM(0));
+                        }
+                        if decision == Some(paste_queue::Key::Defer) {
+                            note("queue paste held");
+                            return LRESULT(1);
+                        }
+                        note("queue paste passed");
                     }
                 }
             }
@@ -850,6 +1037,32 @@ fn start_paste_hook() {
             PASTE_HOOK.store(h.0, Relaxed);
         }
     }
+}
+
+/// Send one Ctrl+V on behalf of a paste that was held back.
+fn replay_paste() {
+    let key = |vk: VIRTUAL_KEY, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                dwExtraInfo: REPLAY_TAG,
+                ..Default::default()
+            },
+        },
+    };
+    let ctrl = keys::held_now() & MOD_CONTROL.0 != 0;
+    let mut inputs = Vec::new();
+    if !ctrl {
+        inputs.push(key(VK_CONTROL, false));
+    }
+    inputs.extend([key(VK_V, false), key(VK_V, true)]);
+    if !ctrl {
+        inputs.push(key(VK_CONTROL, true));
+    }
+    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+    note(&format!("queue replay sent {sent}/{}", inputs.len()));
 }
 
 fn stop_hook(h: &Hook) {
@@ -880,18 +1093,7 @@ pub fn set_notch_hook(on: bool) {
                     if n.expanded() && n.in_island() && !n.modal && n.recording.is_none() && a.overlay.is_none() {
                         let k = &*(l.0 as *const KBDLLHOOKSTRUCT);
                         let down = |v: VIRTUAL_KEY| GetAsyncKeyState(v.0 as i32) < 0;
-                        let mut mods = 0u32;
-                        for (v, bit) in [
-                            (VK_CONTROL, MOD_CONTROL),
-                            (VK_SHIFT, MOD_SHIFT),
-                            (VK_MENU, MOD_ALT),
-                            (VK_LWIN, MOD_WIN),
-                            (VK_RWIN, MOD_WIN),
-                        ] {
-                            if down(v) {
-                                mods |= bit.0;
-                            }
-                        }
+                        let mods = keys::held(down);
                         if n.wants_key(a, mods, k.vkCode) {
                             // In a low-level hook key state is the state before this
                             // event. A held H should not flip save-only repeatedly.
@@ -1074,6 +1276,21 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                         n.flash(&a.g, &a.store, id);
                     }
                 }
+                Work::Saved(id, true) => a.store.saved(id),
+                Work::Saved(id, false) => {
+                    note("shot save failed");
+                    let on_clipboard = a.clip.contains(&id);
+                    // The image itself may still be on the clipboard; only the shelf entry goes.
+                    a.store.save_failed(id);
+                    a.clip.retain(|i| *i != id);
+                    n.refresh(&a.g, &a.store);
+                    let hint = if on_clipboard {
+                        "It is still on the clipboard. Check free space and the save folder."
+                    } else {
+                        "Check free space and the save folder."
+                    };
+                    n.notice(&a.g, &a.store, "Couldn't save the screenshot", hint);
+                }
                 Work::Name(id, t) => {
                     // Never under a drag in progress.
                     if !n.modal {
@@ -1090,7 +1307,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     let id = c.and_then(|c| a.store.add(&c.path, Kind::Clip, &c.thumb, &app, c.secs).ok());
                     match id {
                         Some(id) => {
-                            a.copy(&[id]);
+                            let _ = a.copy(&[id]);
                             n.flash(&a.g, &a.store, id);
                         }
                         None => n.fail(),
@@ -1109,15 +1326,18 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     });
                     match id {
                         Some(id) => {
-                            a.copy(&[id]);
+                            let copied = a.copy(&[id]).ok();
                             n.flash(&a.g, &a.store, id);
-                            n.mark_copied(id);
+                            if copied {
+                                n.mark_copied(id);
+                            }
                         }
                         None => n.fail(),
                     }
                 }
                 Work::ScrollPdf(result) => {
                     a.scroll_pdf_stop = None;
+                    stop_hook(&ESC_HOOK);
                     match result {
                         Ok((path, thumb, app, end)) => {
                             if let Ok(id) = a.store.add(&path, Kind::Pdf, &thumb, &app, 0) {
@@ -1132,8 +1352,8 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     if a.quitting { a.quit(n); }
                 }
                 Work::Text(t) => {
-                    clip::set_text(a.main, &t);
-                    n.done(&a.g, &a.store);
+                    let r = a.put_text(&t);
+                    n.copied_or_not(&a.g, &a.store, r);
                 }
                 Work::Failed => n.fail(),
             }
@@ -1155,12 +1375,12 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
             }
         }
         WM_NOTCH_KEY => n.key(a, wp.0 as u32, l.0 as u32),
-        WM_PASTED => {
-            // The app reads the clipboard now; swap it once that's done.
-            if !a.queue.is_empty() {
-                unsafe {
-                    SetTimer(Some(h), T_PASTE, 250, None);
-                }
+        // A paste key was seen; the swap waits for the target's read.
+        WM_PASTED => n.repaint(),
+        WM_QUEUE_STEP => a.queue_step(n, code_then(wp.0)),
+        WM_REPLAY => {
+            if a.queue_active() {
+                replay_paste();
             }
         }
         WM_DRAG_OUT => {
@@ -1228,10 +1448,23 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 a.take_clipboard(n);
             }
             T_PASTE => {
-                unsafe {
-                    let _ = KillTimer(Some(h), T_PASTE);
+                // Notice a paste nobody read; the queue then waits for Next.
+                match with_queue(|q| (q.phase, { q.tick(Instant::now()); q.phase })) {
+                    None => unsafe {
+                        let _ = KillTimer(Some(h), T_PASTE);
+                    },
+                    Some((was, now)) if was != now => note(&format!("queue stalled {:?}", match now {
+                        paste_queue::Phase::Stalled(s) => format!("{s:?}"),
+                        p => format!("{p:?}"),
+                    })),
+                    Some(_) => {}
                 }
-                a.next_in_queue(n);
+            }
+            T_QUEUE_RETRY => {
+                unsafe {
+                    let _ = KillTimer(Some(h), T_QUEUE_RETRY);
+                }
+                a.queue_step(n, paste_queue::Then::Place);
             }
             T_HOURLY => {
                 let _ = a.store.reload();
@@ -1243,9 +1476,9 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                         let _ = KillTimer(Some(h), T_TRIM);
                     }
                     // The clipboard keeps its own copy; the file serves PNG from here.
-                    if let (Some(PngSource::Frame(_)), [id]) = (&a.png, a.clip.as_slice()) {
+                    if let (Some(ClipSource::Frame(_)), [id]) = (&a.png, a.clip.as_slice()) {
                         if let Some(i) = a.store.get(*id).filter(|i| i.path.exists()) {
-                            a.png = Some(PngSource::File(i.path.clone()));
+                            a.png = Some(ClipSource::File(i.path.clone()));
                         }
                     }
                     n.trim(&a.store);
@@ -1276,15 +1509,49 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
             }
         }
         WM_RENDERFORMAT => {
-            if wp.0 as u32 == clip::png_format() {
-                if let Some(b) = a.png.as_ref().and_then(|p| p.bytes()) {
-                    clip::render_png(&b);
+            let format = wp.0 as u32;
+            let reader_win = unsafe { GetOpenClipboardWindow() }.ok();
+            // Which app asked: a process name only, for diagnosing early readers.
+            let reader = reader_win.map(capture::app_name).unwrap_or_default();
+            // Clipboard monitors (Mouse Without Borders, sync tools) read every new
+            // image at once. Rendering for them would cache the data, and the real
+            // paste would then never reach us. While no paste is pending, a read from
+            // a background process gets nothing and the promise stays open.
+            let background = reader_win.is_some_and(|w| {
+                let pid = window_pid(w);
+                pid != 0 && pid != unsafe { GetCurrentProcessId() } && pid != window_pid(unsafe { GetForegroundWindow() })
+            });
+            if background && with_queue(|q| !q.waiting()).unwrap_or(false) {
+                note(&format!("queue declined early read format {format} by '{reader}'"));
+                return LRESULT(0);
+            }
+            if let Some(b) = a.png.as_ref().and_then(|p| p.bytes(format)) {
+                clip::render(format, &b);
+            }
+            // The first read of a queued image: a paste has really happened. The
+            // reader holds the clipboard open now, so swap after this returns.
+            if let Some(then) = with_queue(|q| q.read()) {
+                note(&format!("queue read format {format} by '{reader}': {then:?}"));
+                let swapping = with_queue(|q| q.phase == paste_queue::Phase::Swapping).unwrap_or(false);
+                if then == paste_queue::Then::Place || (then == paste_queue::Then::Nothing && swapping) {
+                    // Browsers read a paste in several trips (formats, then data).
+                    // Swapping straight away hands the later trips the next image
+                    // or nothing, so wait until the reads go quiet. Each further read
+                    // restarts the wait.
+                    unsafe {
+                        SetTimer(Some(h), T_QUEUE_RETRY, paste_queue::SETTLE.as_millis() as u32, None);
+                    }
+                } else if then != paste_queue::Then::Nothing {
+                    unsafe {
+                        let _ = PostMessageW(Some(h), WM_QUEUE_STEP, WPARAM(then_code(then)), LPARAM(0));
+                    }
                 }
+                n.repaint();
             }
         }
         WM_RENDERALLFORMATS => {
-            if let Some(b) = a.png.as_ref().and_then(|p| p.bytes()) {
-                clip::render_png_final(h, &b);
+            if let Some(src) = &a.png {
+                clip::render_all(h, |format| src.bytes(format));
             }
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
@@ -1296,6 +1563,7 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
             stop_hook(&HOOK);
             stop_hook(&PASTE_HOOK);
             stop_hook(&NOTCH_HOOK);
+            stop_hook(&ESC_HOOK);
             a.unregister();
             unsafe { PostQuitMessage(0) };
         }
@@ -1305,6 +1573,8 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
             }
         }
     }
+    // Whatever started, advanced or ended Sequential Copy, the ledge follows.
+    n.sync_queue(&a.g, &a.store);
     LRESULT(0)
 }
 
@@ -1390,7 +1660,6 @@ fn main() {
             rec: None,
             rec_app: String::new(),
             floats: Vec::new(),
-            queue: Vec::new(),
             jobs: 0,
             seen: 0,
             quitting: false,

@@ -44,6 +44,8 @@ mod glyph {
     pub const PINNED: u16 = 0xE841;
     pub const GEAR: u16 = 0xE713;
     pub const FOLDER: u16 = 0xE8B7;
+    pub const PHOTO: u16 = 0xEB9F;
+    pub const CLOSE: u16 = 0xE711;
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -61,7 +63,10 @@ pub enum View {
     Rec,
     PdfScroll,
     PdfSaved(i64, bool),
+    /// A titled message with a next step; also used for Scroll to PDF errors.
     PdfError(&'static str, &'static str),
+    /// Sequential Copy in progress, in place of the resting ledge.
+    Queue,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -78,6 +83,8 @@ pub enum Btn {
     Float,
     Gif,
     Queue,
+    QueueNext,
+    QueueStop,
     Stack,
     Unstack,
     Go(Mode),
@@ -170,6 +177,8 @@ pub struct Notch {
     /// Last mouse position, island-local.
     mouse: (f32, f32),
     born: Instant,
+    /// Last Sequential Copy state shown.
+    queue_ui: Option<crate::QueueView>,
 }
 
 fn groups(st: &Store, v: View) -> Vec<Vec<i64>> {
@@ -254,6 +263,7 @@ pub fn size(g: &Gfx, st: &Store, v: View) -> (f32, f32, f32) {
         View::Rec => (118.0, 36.0, 16.0),
         View::PdfScroll | View::PdfSaved(..) => (232.0, 40.0, 18.0),
         View::PdfError(..) => (390.0, 68.0, 18.0),
+        View::Queue => (330.0, 48.0, 18.0),
         View::Flash(_) => (TILE.0 + PAD * 2.0, 116.0, 26.0),
         View::Count(_) | View::Done => {
             let _ = g;
@@ -373,6 +383,7 @@ impl Notch {
                 close_grace: Dwell::default(),
                 mouse: (0.0, 0.0),
                 born: Instant::now(),
+                queue_ui: None,
             })
         }
     }
@@ -476,7 +487,12 @@ impl Notch {
     }
 
     pub fn show(&mut self, g: &Gfx, st: &Store, v: View) {
-        let v = if v == View::Rest && self.rec.is_some() { View::Rec } else { v };
+        let v = match v {
+            View::Rest if self.rec.is_some() => View::Rec,
+            View::Rest if self.queue_ui.is_some() => View::Queue,
+            View::Queue if self.queue_ui.is_none() => View::Rest,
+            v => v,
+        };
         let (w, h, r) = size(g, st, v);
         let same = std::mem::discriminant(&v) == std::mem::discriminant(&self.view)
             && !matches!(v, View::Flash(_) | View::Count(_));
@@ -486,7 +502,7 @@ impl Notch {
             self.prev = Some(self.view);
             self.swap = Instant::now();
             self.more = false;
-            if matches!(v, View::Rest | View::Rec) {
+            if matches!(v, View::Rest | View::Rec | View::Queue) {
                 self.sel.clear();
                 self.scroll.jump(0.0);
                 self.recording = None;
@@ -553,6 +569,45 @@ impl Notch {
     pub fn pdf_saved(&mut self, g: &Gfx, st: &Store, id: i64, partial: bool) {
         self.show(g, st, View::PdfSaved(id, partial));
         unsafe { SetTimer(Some(self.sensor), T_FLASH, 5000, None); }
+    }
+
+    /// Something didn't work and the user should know what and what to do.
+    pub fn notice(&mut self, g: &Gfx, st: &Store, title: &'static str, hint: &'static str) {
+        crate::note(&format!("Notice: {title} | {hint}"));
+        self.hide(false);
+        self.show(g, st, View::PdfError(title, hint));
+    }
+
+    /// Report a clipboard write: a check when it worked, the reason when it didn't.
+    pub fn copied_or_not(&mut self, g: &Gfx, st: &Store, r: crate::clip::Set) {
+        match r {
+            crate::clip::Set::Ok => self.done(g, st),
+            r => self.copy_failed(g, st, r),
+        }
+    }
+
+    pub fn copy_failed(&mut self, g: &Gfx, st: &Store, r: crate::clip::Set) {
+        match r {
+            crate::clip::Set::Ok => {}
+            crate::clip::Set::Busy => self.notice(g, st, "Not copied",
+                "Clipboard busy or file missing. The clipboard keeps what it had; try again."),
+            crate::clip::Set::Cleared => self.notice(g, st, "Not copied",
+                "The image couldn't be placed and the clipboard is now empty. Try again."),
+        }
+    }
+
+    /// Follow Sequential Copy starting, advancing, stalling or ending.
+    pub fn sync_queue(&mut self, g: &Gfx, st: &Store) {
+        let now = crate::queue_view();
+        if now == self.queue_ui {
+            return;
+        }
+        let was = std::mem::replace(&mut self.queue_ui, now);
+        match (was.is_some(), now.is_some(), self.view) {
+            (false, true, View::Rest) => self.show(g, st, View::Rest),
+            (true, false, View::Queue) => self.show(g, st, View::Rest),
+            _ => self.dirty = true,
+        }
     }
 
     pub fn done(&mut self, g: &Gfx, st: &Store) {
@@ -644,8 +699,8 @@ impl Notch {
         if all(Kind::Clip) {
             v.push((Btn::Gif, "GIF"));
         }
-        if many {
-            v.push((Btn::Queue, "Queue"));
+        if many && all(Kind::Shot) {
+            v.push((Btn::Queue, "Sequential Copy"));
         }
         let stacks: Vec<i64> = items.iter().map(|i| i.stack).collect();
         let one = !stacks.is_empty() && stacks[0] != 0 && stacks.iter().all(|s| *s == stacks[0]);
@@ -780,6 +835,10 @@ impl Notch {
             View::PdfScroll => b(&mut v, Btn::StopPdf, R::new(8.0, 4.0, w - 16.0, h - 8.0)),
             View::PdfSaved(id, _) => b(&mut v, Btn::OpenPdf(id), R::new(8.0, 4.0, w - 16.0, h - 8.0)),
             View::PdfError(..) => b(&mut v, Btn::DismissPdfError, R::new(0.0, 0.0, w, h)),
+            View::Queue => {
+                b(&mut v, Btn::QueueStop, R::new(w - 40.0, 8.0, 32.0, 32.0));
+                b(&mut v, Btn::QueueNext, R::new(w - 104.0, 8.0, 58.0, 32.0));
+            }
             _ => {}
         }
         v
@@ -863,6 +922,7 @@ impl Notch {
         // frames; a large shelf/scroll shouldn't run every decode in one frame.
         let mut need: Vec<i64> = match self.view {
             View::Flash(id) => vec![id],
+            View::Queue => self.queue_ui.and_then(|q| q.current).into_iter().collect(),
             View::Shelf if app.store.filter == Filter::Apps => Vec::new(),
             v => self
                 .tile_rects(&app.store, v, now)
@@ -999,11 +1059,12 @@ impl Notch {
                 if app.store.settings.save_only {
                     c.circle(w - 20.0, h / 2.0, 2.0, DIM, 0.92);
                 }
-                // One dot for each thing left to paste.
-                let left = app.queue.len().min(14);
-                let x0 = w / 2.0 - (left as f32 - 1.0) * 4.5;
-                for k in 0..left {
-                    c.circle(x0 + k as f32 * 9.0, h / 2.0, 2.2, INK, if k == 0 { 1.0 } else { 0.5 });
+                // Screenshots visible on the shelf; hidden and save-only ones don't count.
+                let shots = visible_shots(&app.store);
+                if shots > 0 {
+                    let label = if shots > 999 { "999+".to_string() } else { shots.to_string() };
+                    c.icon(glyph::PHOTO, R::new(12.0, 0.0, 10.0, h), 7.0, DIM, 0.95);
+                    c.text_w(&label, R::new(25.0, -1.0, 40.0, h + 2.0), 8.0, 600, DIM, 0.95, Align::Left);
                 }
             }
             View::Rec => {
@@ -1029,6 +1090,30 @@ impl Notch {
                 c.text_w(title, R::new(31.0, 10.0, w - 48.0, 24.0), 14.0, 650, INK, 1.0, Align::Left);
                 c.text(hint, R::new(18.0, 32.0, w - 38.0, 22.0), 12.0, DIM, 1.0, Align::Left);
                 c.text("×", R::new(w - 27.0, 8.0, 21.0, 22.0), 15.0, DIM, 1.0, Align::Center);
+            }
+            View::Queue => {
+                let Some(q) = self.queue_ui else { return };
+                let thumb = R::new(10.0, 7.0, 54.0, 34.0);
+                c.fill(thumb, 6.0, CARD, 1.0);
+                if let Some(b) = q.current.and_then(|id| self.bitmap(id, extra)) {
+                    if q.stall != Some(crate::paste_queue::Stall::Missing) {
+                        c.image_round(b, thumb, 6.0, 1.0);
+                    }
+                }
+                c.stroke(thumb.grow(-0.5), 5.5, 1.0, INK, 0.12);
+                let (title, hint) = queue_text(&q);
+                let tx = thumb.x + thumb.w + 10.0;
+                let tw = at(Btn::QueueNext).map_or(w - tx, |r| r.x - tx - 6.0);
+                let color = if q.stall.is_some() { RED } else { INK };
+                c.text_w(&fitted(&app.g, &title, 13.0, tw), R::new(tx, 6.0, tw, 20.0), 13.0, 600, color, 1.0, Align::Left);
+                c.text(&fitted(&app.g, hint, 11.0, tw), R::new(tx, 25.0, tw, 16.0), 11.0, DIM, 1.0, Align::Left);
+                let next = match q.stall {
+                    Some(crate::paste_queue::Stall::Missing) => "Skip",
+                    Some(crate::paste_queue::Stall::Busy) => "Retry",
+                    _ => "Next",
+                };
+                pill(Btn::QueueNext, next, INK);
+                round(Btn::QueueStop, glyph::CLOSE, INK);
             }
             View::Flash(id) => {
                 let dy = match self.captured {
@@ -1425,6 +1510,7 @@ impl Notch {
             (false, false, VK_BACK) => self.view == View::Shelf
                 && (!self.sel.is_empty() || matches!(app.store.filter, Filter::App(_))),
             (false, false, VK_P) => self.view == View::Shelf && !self.sel.is_empty(),
+            (false, false, VK_Q) => self.view == View::Shelf && self.actions(&app.g, &app.store).iter().any(|a| a.0 == Btn::Queue),
             _ => false,
         }
     }
@@ -1461,8 +1547,9 @@ impl Notch {
                     self.button(app, Btn::Copy);
                 } else if let Some(Hit::Tile(id) | Hit::Check(id)) = self.hover {
                     let ids = group_of(&app.store, self.view, id);
-                    if app.copy(&ids) {
-                        self.mark_copied(id);
+                    match app.copy(&ids) {
+                        crate::clip::Set::Ok => self.mark_copied(id),
+                        r => self.copy_failed(&app.g, &app.store, r),
                     }
                 }
             }
@@ -1486,6 +1573,7 @@ impl Notch {
             }
             (false, VK_DELETE | VK_BACK) => self.button(app, Btn::Delete),
             (false, VK_P) => self.button(app, Btn::Pin),
+            (false, VK_Q) => self.button(app, Btn::Queue),
             (false, VK_ESCAPE) => {
                 if self.more {
                     self.more = false;
@@ -1620,7 +1708,7 @@ impl Notch {
             View::Count(_) => return,
             _ => {}
         }
-        if matches!(self.view, View::Rec | View::PdfScroll | View::PdfSaved(..) | View::PdfError(..)) {
+        if matches!(self.view, View::Rec | View::PdfScroll | View::PdfSaved(..) | View::PdfError(..) | View::Queue) {
             let h = self.hit(app, x, y);
             self.set_hover(h);
             return;
@@ -1723,7 +1811,12 @@ impl Notch {
         self.just_opened_app = false;
         self.mouse = self.local(l);
         self.cancel_open();
-        if !self.expanded() && !matches!(self.view, View::Rec | View::PdfScroll | View::PdfSaved(..) | View::PdfError(..)) {
+        if self.view == View::Queue && self.hit(app, self.mouse.0, self.mouse.1).is_none() {
+            // Away from its buttons the queue ledge opens like the resting one.
+            self.show(&app.g, &app.store, View::Peek);
+            return;
+        }
+        if !self.expanded() && !matches!(self.view, View::Rec | View::PdfScroll | View::PdfSaved(..) | View::PdfError(..) | View::Queue) {
             if matches!(self.view, View::Rest | View::Flash(_)) {
                 self.show(&app.g, &app.store, View::Peek);
             }
@@ -1807,8 +1900,11 @@ impl Notch {
                     if self.sel.is_empty() {
                         self.more = false;
                     }
-                } else if app.copy(&ids) {
-                    self.mark_copied(id);
+                } else {
+                    match app.copy(&ids) {
+                        crate::clip::Set::Ok => self.mark_copied(id),
+                        r => self.copy_failed(&app.g, &app.store, r),
+                    }
                 }
             }
             Hit::B(b) => self.button(app, b),
@@ -1917,8 +2013,10 @@ impl Notch {
             Btn::Settings => self.show(&app.g, &app.store, View::Settings),
             Btn::More => self.more = !self.more,
             Btn::Copy => {
-                if app.copy(&self.sel.clone()) {
-                    self.mark_copied(self.sel[0]);
+                // One image goes as a picture; several go as files (bulk Copy).
+                match app.copy(&self.sel.clone()) {
+                    crate::clip::Set::Ok => self.mark_copied(self.sel[0]),
+                    r => self.copy_failed(&app.g, &app.store, r),
                 }
             }
             Btn::Pin => {
@@ -1969,13 +2067,32 @@ impl Notch {
                 app.gif(&ids);
             }
             Btn::Queue => {
-                let ids = std::mem::take(&mut self.sel);
-                let ok = app.start_queue(&ids);
-                self.show(&app.g, &app.store, View::Rest);
-                if !ok {
-                    self.fail();
+                let sel = std::mem::take(&mut self.sel);
+                // Shelf display order, not the order the tiles were ticked.
+                let ids: Vec<i64> = groups(&app.store, View::Shelf).into_iter().flatten().filter(|i| sel.contains(i)).collect();
+                self.more = false;
+                match app.start_queue(&ids) {
+                    Ok(()) => {
+                        self.queue_ui = crate::queue_view();
+                        self.show(&app.g, &app.store, View::Queue);
+                    }
+                    Err(crate::paste_queue::Placed::Missing) => {
+                        self.notice(&app.g, &app.store, "Sequential Copy didn't start", "The first image's file is missing.")
+                    }
+                    Err(_) => self.notice(&app.g, &app.store, "Sequential Copy didn't start",
+                        "The clipboard is busy. Nothing was changed; try again."),
                 }
             }
+            Btn::QueueNext => {
+                let then = crate::with_queue(|q| match q.phase {
+                    crate::paste_queue::Phase::Stalled(crate::paste_queue::Stall::Busy) => q.retry(),
+                    _ => q.next(),
+                });
+                if let Some(then) = then {
+                    app.queue_step(self, then);
+                }
+            }
+            Btn::QueueStop => app.stop_queue(),
             Btn::Stack => {
                 let ids = std::mem::take(&mut self.sel);
                 app.store.stack(&ids, ids[0]);
@@ -2031,6 +2148,22 @@ impl Notch {
             }
         }
         self.dirty = true;
+    }
+}
+
+/// Screenshots the shelf shows; hidden and save-only shots are excluded.
+pub fn visible_shots(st: &Store) -> usize {
+    st.items.iter().filter(|i| i.kind == Kind::Shot && !i.hidden).count()
+}
+
+fn queue_text(q: &crate::QueueView) -> (String, &'static str) {
+    use crate::paste_queue::Stall;
+    match q.stall {
+        None => (format!("Next {} of {}", q.pos, q.len), "Ctrl+V pastes it"),
+        Some(Stall::NotRead) => ("Paste not detected".into(), "Paste again, or Next"),
+        Some(Stall::ReadElsewhere) => ("Pasted another way?".into(), "Next, or paste again"),
+        Some(Stall::Busy) => ("Clipboard busy".into(), "Retry to swap"),
+        Some(Stall::Missing) => (format!("Image {} of {} missing", q.pos, q.len), "Skip it, or stop"),
     }
 }
 

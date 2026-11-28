@@ -100,6 +100,8 @@ pub struct Store {
     pub settings: Settings,
     pub filter: Filter,
     next_file: Cell<u64>,
+    /// Shots indexed before their file is written. Never dropped as missing.
+    unsaved: std::collections::HashSet<i64>,
 }
 
 /// Folders are independent of capture stacks and show the most recent app first.
@@ -223,6 +225,7 @@ impl Store {
             },
             filter: Filter::All,
             next_file: Cell::new(0),
+            unsaved: Default::default(),
         };
         s.load_settings();
         s.reload()?;
@@ -304,8 +307,9 @@ impl Store {
         let mut keep = Vec::new();
         for i in all {
             let expired = !i.pinned && i.created < oldest;
-            // A shot's file is written in the background, so give it a moment.
-            let missing = now - i.created > 10_000 && !i.path.exists();
+            // A shot still being written is expected to be missing; anything else
+            // missing would be a tile that opens nothing.
+            let missing = !self.unsaved.contains(&i.id) && !i.path.exists();
             if expired || missing {
                 let _ = self.db.execute("DELETE FROM items WHERE id=?", [i.id]);
             } else {
@@ -378,12 +382,47 @@ impl Store {
     }
 
     pub fn add(&mut self, path: &Path, kind: Kind, thumb: &Frame, app: &str, secs: i64) -> rusqlite::Result<i64> {
+        self.insert(path, kind, thumb, app, secs, false)
+    }
+
+    /// Index a shot whose file is still being written. Call `saved` or
+    /// `save_failed` when the write finishes.
+    pub fn add_unsaved(&mut self, path: &Path, thumb: &Frame, app: &str) -> rusqlite::Result<i64> {
+        self.insert(path, Kind::Shot, thumb, app, 0, true)
+    }
+
+    pub fn saved(&mut self, id: i64) {
+        self.unsaved.remove(&id);
+    }
+
+    /// The write failed or was abandoned: drop the row so no tile points at nothing.
+    /// Returns whether an item was removed.
+    pub fn save_failed(&mut self, id: i64) -> bool {
+        self.unsaved.remove(&id);
+        let Some(path) = self.get(id).map(|i| i.path.clone()) else { return false };
+        let _ = std::fs::remove_file(path.with_extension("part"));
+        let gone = !path.exists();
+        if gone {
+            let _ = self.db.execute("DELETE FROM items WHERE id=?", [id]);
+        }
+        let _ = self.reload();
+        gone
+    }
+
+    pub fn is_unsaved(&self, id: i64) -> bool {
+        self.unsaved.contains(&id)
+    }
+
+    fn insert(&mut self, path: &Path, kind: Kind, thumb: &Frame, app: &str, secs: i64, unsaved: bool) -> rusqlite::Result<i64> {
         let (t, ord) = self.top();
         self.db.execute(
             "INSERT INTO items(path,kind,created,ord,thumb,app,secs,hidden) VALUES(?,?,?,?,?,?,?,?)",
             params![path.to_string_lossy(), kind as i64, t, ord, encode_png(thumb), app, secs, kind == Kind::Shot && self.settings.save_only],
         )?;
         let id = self.db.last_insert_rowid();
+        if unsaved {
+            self.unsaved.insert(id);
+        }
         self.reload()?;
         Ok(id)
     }
@@ -654,6 +693,43 @@ mod tests {
         st.set_hidden(&[older], false).unwrap();
         assert!(st.recent().iter().flatten().any(|id| *id == older));
         assert_eq!(st.shelf(), vec![vec![saved]]);
+        drop(st);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn failed_saves_leave_no_tile_behind() {
+        let temp = std::env::temp_dir().join(format!("ledge-ghost-{}-{}", std::process::id(), now_ms()));
+        let base = temp.join("shots");
+        let mut st = Store::open_at(&temp, base.clone()).unwrap();
+        let frame = Frame::new(2, 2);
+        let visible = |st: &Store| st.recent().into_iter().flatten().collect::<Vec<_>>();
+
+        // In flight: listed even though the file isn't there yet, and survives a reload.
+        let ok_path = st.new_path("png", "Explorer").unwrap();
+        let ok = st.add_unsaved(&ok_path, &frame, "Explorer").unwrap();
+        st.reload().unwrap();
+        assert_eq!(visible(&st), [ok]);
+        write_file(&ok_path, &encode_png(&frame)).unwrap();
+        st.saved(ok);
+
+        // A write that fails (here: a half-written .part and no final file).
+        let bad_path = st.new_path("png", "Explorer").unwrap();
+        let bad = st.add_unsaved(&bad_path, &frame, "Explorer").unwrap();
+        std::fs::write(bad_path.with_extension("part"), b"partial").unwrap();
+        assert_eq!(visible(&st), [bad, ok]);
+        assert!(st.save_failed(bad));
+        assert_eq!(visible(&st), [ok], "the shelf must drop the failed tile at once");
+        assert!(st.get(bad).is_none() && !bad_path.with_extension("part").exists());
+
+        // An abandoned write (app quit mid-save) is gone on the next launch, not 10 s later.
+        let lost_path = st.new_path("png", "Explorer").unwrap();
+        let lost = st.add_unsaved(&lost_path, &frame, "Explorer").unwrap();
+        drop(st);
+        let st = Store::open_at(&temp, base).unwrap();
+        assert!(st.get(lost).is_none() && st.get(bad).is_none());
+        assert_eq!(visible(&st), [ok]);
+        assert!(st.get(ok).unwrap().path.exists());
         drop(st);
         std::fs::remove_dir_all(temp).unwrap();
     }

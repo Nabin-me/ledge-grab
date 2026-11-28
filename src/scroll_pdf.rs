@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, IsWindow, SetCursorPos, WindowFromPoint,
+    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowRect, IsWindow, SetCursorPos, WindowFromPoint,
 };
 
 const MIN_WIDTH: i32 = 120;
@@ -87,25 +87,37 @@ fn root(h: HWND) -> HWND {
     unsafe { GetAncestor(h, GA_ROOT) }
 }
 
-fn check_pane(target: HWND, r: RECT) -> Result<(), End> {
-    // A click-through target could otherwise be overlapped by another app.
-    let mid = POINT { x: r.left + (r.right - r.left) / 2, y: r.top + (r.bottom - r.top) / 2 };
-    let points = [
-        mid,
-        POINT { x: r.left + 2, y: r.top + 2 },
-        POINT { x: r.right - 3, y: r.top + 2 },
-        POINT { x: r.left + 2, y: r.bottom - 3 },
-        POINT { x: r.right - 3, y: r.bottom - 3 },
-    ];
+fn check_pane(target: HWND, r: RECT, win: Option<RECT>) -> Result<(), End> {
     unsafe {
         if !IsWindow(Some(target)).as_bool() || root(GetForegroundWindow()) != target {
             return Err(End::NotForeground);
         }
-        if !points.iter().all(|&p| root(WindowFromPoint(p)) == target) {
-            return Err(End::PaneCovered);
+        // The pane rectangle is fixed at the start; a moved or resized window
+        // would put other content under it.
+        if let Some(win) = win {
+            let mut now = RECT::default();
+            if GetWindowRect(target, &mut now).is_err() || now != win {
+                return Err(End::TargetChanged);
+            }
+        }
+        // A 5 x 5 grid, edges included, so a small window over the middle of the
+        // pane is caught here instead of surfacing later as a failed seam.
+        let (w, h) = (r.right - r.left - 5, r.bottom - r.top - 5);
+        for i in 0..5 {
+            for j in 0..5 {
+                let p = POINT { x: r.left + 2 + w * i / 4, y: r.top + 2 + h * j / 4 };
+                if root(WindowFromPoint(p)) != target {
+                    return Err(End::PaneCovered);
+                }
+            }
         }
         Ok(())
     }
+}
+
+fn window_rect(h: HWND) -> Option<RECT> {
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(h, &mut r) }.ok().map(|_| r)
 }
 
 fn stopped(stop: &AtomicBool) -> bool {
@@ -113,7 +125,7 @@ fn stopped(stop: &AtomicBool) -> bool {
 }
 
 fn settle(
-    r: RECT, stop: &AtomicBool, target: HWND, parked: POINT, wheel: usize,
+    r: RECT, win: Option<RECT>, stop: &AtomicBool, target: HWND, parked: POINT, wheel: usize,
 ) -> Result<Frame, End> {
     let start = Instant::now();
     let (mut samples, mut broad, mut local) = (0, 0, 0);
@@ -123,13 +135,13 @@ fn settle(
         if stopped(stop) {
             return Err(End::UserStopped);
         }
-        check_pane(target, r)?;
+        check_pane(target, r, win)?;
         if !mouse().is_some_and(|p| same_point(p, parked)) {
             return Err(End::MouseMoved);
         }
         let frame = grab(r).map_err(|_| End::CaptureFailed)?;
         // Reject a focus/pointer change that happened during the capture too.
-        check_pane(target, r)?;
+        check_pane(target, r, win)?;
         if !mouse().is_some_and(|p| same_point(p, parked)) {
             return Err(End::MouseMoved);
         }
@@ -195,14 +207,15 @@ pub fn run(r: RECT, hwnd: isize, stop: &AtomicBool) -> Result<Captured, End> {
     // Give the selected window a short chance to return, without sending input
     // or redirecting the mouse until the whole pane passes the check.
     std::thread::sleep(Duration::from_millis(270));
-    let mut target_check = check_pane(target, r);
+    let mut target_check = check_pane(target, r, None);
     for _ in 0..12 {
         if stopped(stop) { return Err(End::UserStopped); }
         if target_check.is_ok() { break; }
         std::thread::sleep(Duration::from_millis(55));
-        target_check = check_pane(target, r);
+        target_check = check_pane(target, r, None);
     }
     target_check?;
+    let win = window_rect(target);
     if stopped(stop) { return Err(End::UserStopped); }
     if !mouse().is_some_and(|p| p.x >= r.left - 20 && p.x <= r.right + 20 && p.y >= r.top - 20 && p.y <= r.bottom + 20) {
         return Err(End::MouseMoved);
@@ -211,7 +224,7 @@ pub fn run(r: RECT, hwnd: isize, stop: &AtomicBool) -> Result<Captured, End> {
     if root(unsafe { WindowFromPoint(parked) }) != target { return Err(End::PaneCovered); }
     unsafe { SetCursorPos(parked.x, parked.y).map_err(|_| End::CaptureFailed)?; }
     let _pointer = Pointer { before, parked };
-    let mut last = settle(r, stop, target, parked, 0)?;
+    let mut last = settle(r, win, stop, target, parked, 0)?;
     let mut stitched = last.clone();
     let width = last.w as usize;
     let height = last.h as usize;
@@ -219,13 +232,15 @@ pub fn run(r: RECT, hwnd: isize, stop: &AtomicBool) -> Result<Captured, End> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let (mut steady, mut moved) = (0, false);
     let mut end = End::Limit;
+    let mut steps = 0;
     for wheel in 1..=180 {
+        steps = wheel;
         if stopped(stop) {
             end = End::UserStopped;
             break;
         }
         if Instant::now() >= deadline { break; }
-        if let Err(reason) = check_pane(target, r) { end = reason; break; }
+        if let Err(reason) = check_pane(target, r, win) { end = reason; break; }
         if !mouse().is_some_and(|p| same_point(p, parked)) {
             end = End::MouseMoved;
             break;
@@ -240,7 +255,7 @@ pub fn run(r: RECT, hwnd: isize, stop: &AtomicBool) -> Result<Captured, End> {
             break;
         }
         std::thread::sleep(Duration::from_millis(105));
-        let current = match settle(r, stop, target, parked, wheel) {
+        let current = match settle(r, win, stop, target, parked, wheel) {
             Ok(f) => f,
             Err(reason) => { end = reason; break; }
         };
@@ -267,5 +282,7 @@ pub fn run(r: RECT, hwnd: isize, stop: &AtomicBool) -> Result<Captured, End> {
             }
         }
     }
+    // Where and why it ended; no pixels or text.
+    crate::note(&format!("Scroll PDF ended: wheel={steps} reason={end:?} rows={}", stitched.h));
     Ok(Captured { frame: stitched, end })
 }

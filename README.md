@@ -77,7 +77,7 @@ Press `B` and Ledge Grab automatically outlines emails, card numbers, phone numb
 | **`⚙`** | Open Settings directly from the ledge (hotkeys, folder, retention, copied images, save-only, launch at login, quit). |
 | **Drag a tile out** | Drops the actual file directly into Slack, Discord, browsers, or any app. |
 | **Drop a tile on another** | Stacks related shots together. |
-| **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, paste queue, stack, or convert a clip to GIF. |
+| **Tick tiles, then `→`** | Merge into a lossless PDF, set on a matched backdrop, float above windows, Sequential Copy, stack, or convert a clip to GIF. |
 | **All · Clips · App folders · Hidden** | Browse visible captures, clips, by app, or hidden screenshots. Click a folder icon to browse that app; Back or `Esc` returns to folders. |
 | **Hide / Show** | Select a screenshot in the shelf and use Hide. In Hidden, select a screenshot and use Show to restore its normal visibility. Neither action moves or deletes a file. |
 | **Ledge shortcuts** | While the ledge is open: `Ctrl`+`A` select all, `Shift`+Click range select, `Ctrl`+`C` copy selected, `Del` delete selected, `P` pin/unpin, `Ctrl`+`D` deselect, `Ctrl`+`,` settings, `Esc` back/close. |
@@ -103,7 +103,7 @@ New shortcuts are active only while the ledge is open and the pointer is over it
 The shelf's **App folders** view collects each app's visible captures across dates. The shelf stays open while you use it and briefly after the pointer leaves, so a quick slip off an edge won't close it.
 
 - **Float** pins any capture above all windows — drag to move, scroll to resize, `Ctrl` + scroll to fade opacity, right-click to close.
-- **Queue** pastes your selected picks in order, advancing automatically on every `Ctrl` + `V`.
+- **Sequential Copy** puts your selected screenshots on the clipboard one at a time, in shelf order. Each `Ctrl` + `V` pastes the next one, even when pressed quickly. The ledge shows a small preview of the image on the clipboard and "Next 1 of 3". If a paste isn't picked up, it stops and offers **Next** instead of skipping. Copying something else ends the queue. The collapsed ledge shows how many visible screenshots are on the shelf.
 - **Copied images** optionally keeps images copied from other apps right on the ledge (copied text is never stored). Anything marked private by other apps is ignored, and you can toggle it anytime in Settings.
 
 ## Capture

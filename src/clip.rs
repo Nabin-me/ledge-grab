@@ -36,70 +36,168 @@ fn open(hwnd: HWND) -> bool {
     false
 }
 
-/// The bitmap goes on now; PNG is promised and rendered only when an app asks.
-pub fn set_image(hwnd: HWND, f: &Frame) -> bool {
-    if f.w < 1 || f.h < 1 || !open(hwnd) {
-        return false;
-    }
-    unsafe {
-        let _ = EmptyClipboard();
-        let head = size_of::<BITMAPV5HEADER>();
-        let n = (f.w * 4) as usize;
-        let ok = global(head + f.px.len(), |p| {
-            let h = BITMAPV5HEADER {
-                bV5Size: head as u32,
-                bV5Width: f.w,
-                // bottom-up: some apps ignore the top-down flag
-                bV5Height: f.h,
-                bV5Planes: 1,
-                bV5BitCount: 32,
-                bV5Compression: BI_BITFIELDS,
-                bV5SizeImage: f.px.len() as u32,
-                bV5RedMask: 0x00ff0000,
-                bV5GreenMask: 0x0000ff00,
-                bV5BlueMask: 0x000000ff,
-                bV5AlphaMask: 0xff000000,
-                bV5CSType: 0x73524742, // sRGB
-                bV5Intent: LCS_GM_IMAGES as u32,
-                ..Default::default()
-            };
-            std::ptr::copy_nonoverlapping(&h as *const _ as *const u8, p, head);
-            for y in 0..f.h {
-                std::ptr::copy_nonoverlapping(f.row(f.h - 1 - y).as_ptr(), p.add(head + y as usize * n), n);
-            }
-        })
-        .and_then(|h| SetClipboardData(CF_DIBV5.0 as u32, Some(h)))
-        .is_ok();
-        let _ = SetClipboardData(png_format(), None);
-        let _ = CloseClipboard();
-        ok
+/// What a clipboard write actually did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Set {
+    Ok,
+    /// Couldn't open or empty the clipboard; whatever was there is still there.
+    Busy,
+    /// The clipboard was emptied, then the new data couldn't be set. It is now empty.
+    Cleared,
+}
+
+impl Set {
+    pub fn ok(self) -> bool {
+        self == Set::Ok
     }
 }
 
-/// Answer WM_RENDERFORMAT. The clipboard is already open then.
-pub fn render_png(png: &[u8]) {
-    unsafe {
-        if let Ok(h) = global(png.len(), |p| std::ptr::copy_nonoverlapping(png.as_ptr(), p, png.len())) {
-            let _ = SetClipboardData(png_format(), Some(h));
+/// Keep the owner's record in step with what a write left on the clipboard, so a
+/// delayed format can only ever be rendered from the image whose bitmap is there.
+pub fn record<S>(r: Set, ids_now: &mut Vec<i64>, source_now: &mut Option<S>, ids: &[i64], source: Option<S>) {
+    match r {
+        Set::Ok => {
+            *ids_now = ids.to_vec();
+            *source_now = source;
+        }
+        // The previous image is still on the clipboard and still described.
+        Set::Busy => {}
+        Set::Cleared => {
+            ids_now.clear();
+            *source_now = None;
         }
     }
 }
 
-/// Answer WM_RENDERALLFORMATS as the app goes away.
-pub fn render_png_final(hwnd: HWND, png: &[u8]) {
+/// A packed top-down frame as a bottom-up 32-bit CF_DIBV5.
+pub fn dibv5(f: &Frame) -> Vec<u8> {
+    let head = size_of::<BITMAPV5HEADER>();
+    let n = (f.w * 4) as usize;
+    let h = BITMAPV5HEADER {
+        bV5Size: head as u32,
+        bV5Width: f.w,
+        // bottom-up: some apps ignore the top-down flag
+        bV5Height: f.h,
+        bV5Planes: 1,
+        bV5BitCount: 32,
+        bV5Compression: BI_BITFIELDS,
+        bV5SizeImage: f.px.len() as u32,
+        bV5RedMask: 0x00ff0000,
+        bV5GreenMask: 0x0000ff00,
+        bV5BlueMask: 0x000000ff,
+        bV5AlphaMask: 0xff000000,
+        bV5CSType: 0x73524742, // sRGB
+        bV5Intent: LCS_GM_IMAGES as u32,
+        ..Default::default()
+    };
+    let mut out = vec![0u8; head + f.px.len()];
+    unsafe { std::ptr::copy_nonoverlapping(&h as *const _ as *const u8, out.as_mut_ptr(), head) };
+    for y in 0..f.h as usize {
+        out[head + y * n..head + (y + 1) * n].copy_from_slice(f.row(f.h - 1 - y as i32));
+    }
+    out
+}
+
+unsafe fn put_bytes(format: u32, b: &[u8]) -> Result<()> {
+    unsafe {
+        let h = global(b.len(), |p| std::ptr::copy_nonoverlapping(b.as_ptr(), p, b.len()))?;
+        if let Err(e) = SetClipboardData(format, Some(h)) {
+            let _ = GlobalFree(Some(HGLOBAL(h.0)));
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+/// Offer a format to be rendered on request. Success returns NULL here, so the
+/// last error is what tells success from failure.
+unsafe fn promise(format: u32) -> bool {
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+        let _ = SetClipboardData(format, None);
+        GetLastError() == WIN32_ERROR(0)
+    }
+}
+
+/// Mark a queued image as private to the paste, so clipboard history and
+/// monitors that honour these formats don't read it before the target app does.
+unsafe fn keep_out_of_history() {
+    unsafe {
+        let zero = 0u32.to_le_bytes();
+        for name in [w!("ExcludeClipboardContentFromMonitorProcessing"), w!("CanIncludeInClipboardHistory"), w!("CanUploadToCloudClipboard")] {
+            let _ = put_bytes(RegisterClipboardFormatW(name), &zero);
+        }
+    }
+}
+
+/// Put one image on the clipboard. Normally the bitmap goes on now and PNG is
+/// promised; `delayed` promises both, so the first read by any app reaches the
+/// owner as WM_RENDERFORMAT. The PNG promise is made only once the bitmap is in
+/// place, so the two formats can never describe different images.
+pub fn set_image(hwnd: HWND, f: &Frame, delayed: bool) -> Set {
+    if f.w < 1 || f.h < 1 || !open(hwnd) {
+        return Set::Busy;
+    }
+    unsafe {
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return Set::Busy;
+        }
+        let bitmap = if delayed { promise(CF_DIBV5.0 as u32) } else { put_bytes(CF_DIBV5.0 as u32, &dibv5(f)).is_ok() };
+        let r = if bitmap {
+            let _ = promise(png_format());
+            if delayed {
+                keep_out_of_history();
+            }
+            Set::Ok
+        } else {
+            Set::Cleared
+        };
+        let _ = CloseClipboard();
+        r
+    }
+}
+
+/// Answer WM_RENDERFORMAT. The clipboard is already open then.
+pub fn render(format: u32, bytes: &[u8]) {
+    unsafe {
+        let _ = put_bytes(format, bytes);
+    }
+}
+
+/// Answer WM_RENDERALLFORMATS as the app goes away: fill every open promise.
+pub fn render_all(hwnd: HWND, mut bytes: impl FnMut(u32) -> Option<Vec<u8>>) {
     unsafe {
         if open(hwnd) {
             if GetClipboardOwner().is_ok_and(|o| o == hwnd) {
-                render_png(png);
+                for format in [CF_DIBV5.0 as u32, png_format()] {
+                    if IsClipboardFormatAvailable(format).is_ok() {
+                        if let Some(b) = bytes(format) {
+                            render(format, &b);
+                        }
+                    }
+                }
             }
             let _ = CloseClipboard();
         }
     }
 }
 
-pub fn set_files(hwnd: HWND, files: &[PathBuf]) -> bool {
+/// Empty the clipboard, so a paste can't repeat a stale image.
+pub fn clear(hwnd: HWND) -> Set {
+    if !open(hwnd) {
+        return Set::Busy;
+    }
+    unsafe {
+        let r = if EmptyClipboard().is_ok() { Set::Ok } else { Set::Busy };
+        let _ = CloseClipboard();
+        r
+    }
+}
+
+pub fn set_files(hwnd: HWND, files: &[PathBuf]) -> Set {
     if files.is_empty() || !open(hwnd) {
-        return false;
+        return Set::Busy;
     }
     let mut names: Vec<u16> = Vec::new();
     for f in files {
@@ -109,32 +207,34 @@ pub fn set_files(hwnd: HWND, files: &[PathBuf]) -> bool {
     }
     names.push(0);
     unsafe {
-        let _ = EmptyClipboard();
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return Set::Busy;
+        }
         let head = size_of::<DROPFILES>();
-        let ok = global(head + names.len() * 2, |p| {
-            let d = DROPFILES { pFiles: head as u32, fWide: true.into(), ..Default::default() };
-            std::ptr::copy_nonoverlapping(&d as *const _ as *const u8, p, head);
-            std::ptr::copy_nonoverlapping(names.as_ptr() as *const u8, p.add(head), names.len() * 2);
-        })
-        .and_then(|h| SetClipboardData(CF_HDROP.0 as u32, Some(h)))
-        .is_ok();
+        let mut b = vec![0u8; head + names.len() * 2];
+        let d = DROPFILES { pFiles: head as u32, fWide: true.into(), ..Default::default() };
+        std::ptr::copy_nonoverlapping(&d as *const _ as *const u8, b.as_mut_ptr(), head);
+        std::ptr::copy_nonoverlapping(names.as_ptr() as *const u8, b.as_mut_ptr().add(head), names.len() * 2);
+        let r = if put_bytes(CF_HDROP.0 as u32, &b).is_ok() { Set::Ok } else { Set::Cleared };
         let _ = CloseClipboard();
-        ok
+        r
     }
 }
 
-pub fn set_text(hwnd: HWND, s: &str) -> bool {
+pub fn set_text(hwnd: HWND, s: &str) -> Set {
     if !open(hwnd) {
-        return false;
+        return Set::Busy;
     }
-    let t: Vec<u16> = s.encode_utf16().chain([0]).collect();
+    let t: Vec<u8> = s.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
     unsafe {
-        let _ = EmptyClipboard();
-        let ok = global(t.len() * 2, |p| std::ptr::copy_nonoverlapping(t.as_ptr() as *const u8, p, t.len() * 2))
-            .and_then(|h| SetClipboardData(CF_UNICODETEXT.0 as u32, Some(h)))
-            .is_ok();
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return Set::Busy;
+        }
+        let r = if put_bytes(CF_UNICODETEXT.0 as u32, &t).is_ok() { Set::Ok } else { Set::Cleared };
         let _ = CloseClipboard();
-        ok
+        r
     }
 }
 
@@ -292,5 +392,144 @@ mod tests {
         assert_eq!((f.w, f.h), (1, 2));
         assert_eq!(f.px, [0, 0, 255, 255, 255, 0, 0, 255]);
         assert!(dib(&b[..44]).is_none());
+    }
+
+    #[test]
+    fn owner_record_follows_what_the_write_left() {
+        let (mut ids, mut src) = (Vec::new(), None);
+        record(Set::Ok, &mut ids, &mut src, &[1], Some("A"));
+        assert_eq!((ids.as_slice(), src), (&[1][..], Some("A")));
+        // B failed before touching the clipboard: A is still there and still described.
+        record(Set::Busy, &mut ids, &mut src, &[2], Some("B"));
+        assert_eq!((ids.as_slice(), src), (&[1][..], Some("A")));
+        // C emptied the clipboard and failed: nothing may be rendered any more.
+        record(Set::Cleared, &mut ids, &mut src, &[3], Some("C"));
+        assert_eq!((ids.as_slice(), src), (&[][..], None));
+    }
+
+    #[test]
+    fn dibv5_round_trips() {
+        let mut f = Frame::new(3, 2);
+        for (n, p) in f.px.chunks_exact_mut(4).enumerate() {
+            p.copy_from_slice(&[n as u8, 10 + n as u8, 20 + n as u8, 255]);
+        }
+        assert_eq!(dib(&dibv5(&f)).unwrap().px, f.px);
+    }
+
+    /// Live clipboard: run alone with `cargo test -- --ignored --test-threads=1`
+    /// on a Windows desktop session.
+    mod live {
+        use super::super::*;
+        use std::cell::RefCell;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+
+        thread_local! {
+            static SOURCE: RefCell<Option<Frame>> = const { RefCell::new(None) };
+            static READS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+        }
+
+        extern "system" fn owner(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+            if msg == WM_RENDERFORMAT {
+                READS.with(|r| r.borrow_mut().push(w.0 as u32));
+                SOURCE.with(|s| {
+                    if let Some(f) = &*s.borrow() {
+                        let b = if w.0 as u32 == png_format() { crate::store::encode_png(f) } else { dibv5(f) };
+                        render(w.0 as u32, &b);
+                    }
+                });
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(h, msg, w, l) }
+        }
+
+        fn window() -> HWND {
+            unsafe {
+                let class = w!("LedgeGrabClipTest");
+                RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(owner), lpszClassName: class, ..Default::default() });
+                CreateWindowExW(Default::default(), class, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None)
+                    .unwrap()
+            }
+        }
+
+        fn solid(bgr: [u8; 3]) -> Frame {
+            let mut f = Frame::new(8, 8);
+            for p in f.px.chunks_exact_mut(4) {
+                p.copy_from_slice(&[bgr[0], bgr[1], bgr[2], 255]);
+            }
+            f
+        }
+
+        /// What a pasting app gets from each image format.
+        fn read_back(h: HWND) -> (Option<[u8; 3]>, Option<[u8; 3]>) {
+            assert!(open(h));
+            let px = |f: Frame| [f.px[0], f.px[1], f.px[2]];
+            let out = unsafe {
+                (bytes(CF_DIBV5.0 as u32).and_then(|b| dib(&b)).map(px), bytes(png_format()).and_then(|b| crate::store::decode_png(&b)).map(px))
+            };
+            unsafe { let _ = CloseClipboard(); }
+            out
+        }
+
+        const RED: [u8; 3] = [0, 0, 255];
+        const GREEN: [u8; 3] = [0, 255, 0];
+        const BLUE: [u8; 3] = [255, 0, 0];
+
+        #[test]
+        #[ignore = "uses the real clipboard"]
+        fn a_failed_copy_never_mixes_two_images() {
+            let h = window();
+            let (mut ids, mut src): (Vec<i64>, Option<Frame>) = (Vec::new(), None);
+            let sync = |src: &Option<Frame>| SOURCE.with(|s| *s.borrow_mut() = src.clone());
+
+            let r = set_image(h, &solid(RED), false);
+            assert_eq!(r, Set::Ok);
+            record(r, &mut ids, &mut src, &[1], Some(solid(RED)));
+            sync(&src);
+
+            // Another app holds the clipboard open while image B is copied.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || unsafe {
+                OpenClipboard(None).unwrap();
+                tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let _ = CloseClipboard();
+            });
+            rx.recv().unwrap();
+            let r = set_image(h, &solid(GREEN), false);
+            assert_eq!(r, Set::Busy, "a held clipboard must be reported, not treated as copied");
+            record(r, &mut ids, &mut src, &[2], Some(solid(GREEN)));
+            sync(&src);
+            holder.join().unwrap();
+
+            assert_eq!(ids, [1]);
+            assert_eq!(read_back(h), (Some(RED), Some(RED)), "bitmap and delayed PNG must be the same image");
+
+            // And a successful replacement moves both formats together.
+            let r = set_image(h, &solid(BLUE), false);
+            record(r, &mut ids, &mut src, &[3], Some(solid(BLUE)));
+            sync(&src);
+            assert_eq!(read_back(h), (Some(BLUE), Some(BLUE)));
+            unsafe { let _ = DestroyWindow(h); }
+        }
+
+        #[test]
+        #[ignore = "uses the real clipboard"]
+        fn a_queued_image_reports_its_first_read() {
+            let h = window();
+            SOURCE.with(|s| *s.borrow_mut() = Some(solid(GREEN)));
+            READS.with(|r| r.borrow_mut().clear());
+            assert_eq!(set_image(h, &solid(GREEN), true), Set::Ok);
+            // Nothing is rendered until an app asks.
+            assert!(READS.with(|r| r.borrow().is_empty()));
+            assert_eq!(read_back(h), (Some(GREEN), Some(GREEN)));
+            let reads = READS.with(|r| r.borrow().clone());
+            assert_eq!(reads, [CF_DIBV5.0 as u32, png_format()]);
+            // Clipboard history is asked to leave it alone.
+            let keep = unsafe { RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")) };
+            assert!(unsafe { IsClipboardFormatAvailable(keep) }.is_ok());
+            assert_eq!(clear(h), Set::Ok);
+            assert_eq!(read_back(h), (None, None));
+            unsafe { let _ = DestroyWindow(h); }
+        }
     }
 }
