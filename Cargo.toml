@@ -14,9 +14,11 @@ png = "0.18"
 regex-lite = "0.1"
 pdf-writer = "0.15"
 rusqlite = { version = "0.43", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
   "Foundation", "Foundation_Collections", "Foundation_Numerics",
@@ -35,8 +37,11 @@ features = [
   "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging",
 ]
 
-[build-dependencies]
+[target.'cfg(not(target_os = "linux"))'.build-dependencies]
 winresource = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

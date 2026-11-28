@@ -1,8 +1,12 @@
-//! Windows' own offline text recognition.
-use crate::capture::Frame;
+//! Offline text recognition: Windows' own engine; none yet on Linux.
+use crate::frame::Frame;
+#[cfg(windows)]
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
+#[cfg(windows)]
 use windows::Media::Ocr::OcrEngine;
+#[cfg(windows)]
 use windows::Storage::Streams::DataWriter;
+#[cfg(windows)]
 use windows::core::Result;
 
 #[derive(Clone, Debug)]
@@ -14,6 +18,7 @@ pub struct Word {
 }
 
 /// Blocking; call from a worker thread.
+#[cfg(windows)]
 pub fn words(f: &Frame) -> Result<Vec<Word>> {
     unsafe {
         use windows::Win32::System::WinRT::*;
@@ -45,4 +50,10 @@ pub fn text(words: &[Word]) -> String {
         s.push_str(&w.text);
     }
     s
+}
+
+/// No recognizer on Linux yet: shots are named after their app.
+#[cfg(not(windows))]
+pub fn words(_f: &Frame) -> Result<Vec<Word>, ()> {
+    Err(())
 }

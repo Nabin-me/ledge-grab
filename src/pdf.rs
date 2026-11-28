@@ -46,12 +46,12 @@ pub fn merge(files: &[PathBuf]) -> Option<Vec<u8>> {
 }
 
 /// Split an image-only scroll capture into printable Letter pages.
-pub fn scroll_pages(frame: &crate::capture::Frame) -> Option<(Vec<u8>, usize)> {
+pub fn scroll_pages(frame: &crate::frame::Frame) -> Option<(Vec<u8>, usize)> {
     let width = usize::try_from(frame.w).ok()?;
     let rows = crate::scroll_pdf_core::page_ranges(&frame.px, width);
     let count = rows.len();
     let pages: Option<Vec<Png>> = rows.into_iter().map(|r| {
-        let page = crate::capture::Frame {
+        let page = crate::frame::Frame {
             w: frame.w, h: r.len() as i32, px: frame.px[r.start * width * 4..r.end * width * 4].to_vec(),
         };
         parse(&crate::store::encode_png(&page))
@@ -100,7 +100,7 @@ fn write_pages(pages: Vec<Png>, letter: bool) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::capture::Frame;
+    use crate::frame::Frame;
 
     #[test]
     fn merges_in_order() {

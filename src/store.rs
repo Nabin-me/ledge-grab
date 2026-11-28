@@ -1,5 +1,5 @@
 //! Shots on disk, an index in SQLite, settings beside it.
-use crate::capture::Frame;
+use crate::frame::Frame;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -183,10 +183,10 @@ impl Store {
     pub fn open() -> rusqlite::Result<Store> {
         // LEDGE_GRAB_DIR keeps test runs away from the real history.
         let test = std::env::var_os("LEDGE_GRAB_DIR").map(PathBuf::from).or_else(|| {
-            crate::scroll_pdf_preview().then(|| env_dir("LOCALAPPDATA").join("Ledge Grab Scroll PDF Preview"))
+            crate::scroll_pdf_preview().then(|| data_root().join("Ledge Grab Scroll PDF Preview"))
         });
-        let data = test.clone().unwrap_or_else(|| env_dir("LOCALAPPDATA").join("Ledge Grab"));
-        let pictures = windows_pictures().unwrap_or_else(|| env_dir("USERPROFILE").join("Pictures"));
+        let data = test.clone().unwrap_or_else(|| data_root().join("Ledge Grab"));
+        let pictures = pictures_dir();
         let folder = test.map(|t| t.join("shots")).unwrap_or_else(|| pictures.join("Ledge Grab"));
         Self::open_at(&data, folder)
     }
@@ -206,16 +206,16 @@ impl Store {
         for c in ["app TEXT NOT NULL DEFAULT ''", "preview TEXT NOT NULL DEFAULT ''", "body TEXT", "secs INTEGER NOT NULL DEFAULT 0", "hidden INTEGER NOT NULL DEFAULT 0"] {
             let _ = db.execute(&format!("ALTER TABLE items ADD COLUMN {c}"), []);
         }
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
+        use crate::vk::*;
         let mut s = Store {
             db,
             items: Vec::new(),
             settings: Settings {
                 folder,
-                region: ((MOD_CONTROL | MOD_SHIFT).0, 'S' as u32),
-                screen: (0, VK_SNAPSHOT.0 as u32),
-                window: (MOD_ALT.0, VK_SNAPSHOT.0 as u32),
-                clip: (MOD_SHIFT.0, VK_SNAPSHOT.0 as u32),
+                region: (MOD_CONTROL | MOD_SHIFT, 'S' as u32),
+                screen: (0, VK_SNAPSHOT),
+                window: (MOD_ALT, VK_SNAPSHOT),
+                clip: (MOD_SHIFT, VK_SNAPSHOT),
                 history: true,
                 save_only: false,
                 keep_days: 7,
@@ -361,13 +361,8 @@ impl Store {
     /// A new file path under the capture's local day and source app.
     /// Existing items hold their exact paths in SQLite; no migration is needed.
     pub fn new_path(&self, ext: &str, app: &str) -> std::io::Result<PathBuf> {
-        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-        let (dir, stem) = dated_location(
-            &self.settings.folder,
-            app,
-            [t.wYear, t.wMonth, t.wDay],
-            [t.wHour, t.wMinute, t.wSecond, t.wMilliseconds],
-        );
+        let (date, time) = local_now();
+        let (dir, stem) = dated_location(&self.settings.folder, app, date, time);
         std::fs::create_dir_all(&dir)?;
         // A GIF batch can queue multiple writes before any of them reaches SQLite
         // or disk. Allocate a distinct stem to each worker, including its .part file.
@@ -746,15 +741,73 @@ mod tests {
     }
 }
 
-fn windows_pictures() -> Option<PathBuf> {
+/// Local calendar date and time of day: [year, month, day], [hour, min, sec, ms].
+#[cfg(windows)]
+fn local_now() -> ([u16; 3], [u16; 4]) {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    ([t.wYear, t.wMonth, t.wDay], [t.wHour, t.wMinute, t.wSecond, t.wMilliseconds])
+}
+
+#[cfg(unix)]
+fn local_now() -> ([u16; 3], [u16; 4]) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    (
+        [(tm.tm_year + 1900) as u16, (tm.tm_mon + 1) as u16, tm.tm_mday as u16],
+        [tm.tm_hour as u16, tm.tm_min as u16, tm.tm_sec as u16, now.subsec_millis() as u16],
+    )
+}
+
+/// Where the index and settings live.
+#[cfg(windows)]
+fn data_root() -> PathBuf {
+    env_dir("LOCALAPPDATA")
+}
+
+/// `$XDG_DATA_HOME`, else `~/.local/share`.
+#[cfg(unix)]
+fn data_root() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| env_dir("HOME").join(".local").join("share"))
+}
+
+#[cfg(windows)]
+fn pictures_dir() -> PathBuf {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::*;
-    unsafe {
-        let p = SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None).ok()?;
-        let s = p.to_string().ok();
-        CoTaskMemFree(Some(p.0 as *const _));
-        s.map(PathBuf::from)
-    }
+    let known = unsafe {
+        SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None).ok().and_then(|p| {
+            let s = p.to_string().ok();
+            CoTaskMemFree(Some(p.0 as *const _));
+            s
+        })
+    };
+    known.map(PathBuf::from).unwrap_or_else(|| env_dir("USERPROFILE").join("Pictures"))
+}
+
+/// The XDG Pictures folder from `user-dirs.dirs`, else `~/Pictures`.
+#[cfg(unix)]
+fn pictures_dir() -> PathBuf {
+    let home = env_dir("HOME");
+    let config = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    std::fs::read_to_string(config.join("user-dirs.dirs")).ok()
+        .and_then(|s| xdg_pictures(&s, &home))
+        .unwrap_or_else(|| home.join("Pictures"))
+}
+
+/// Parse `XDG_PICTURES_DIR="$HOME/Pictures"` from a user-dirs file.
+#[cfg(unix)]
+fn xdg_pictures(file: &str, home: &Path) -> Option<PathBuf> {
+    let line = file.lines().find(|l| l.trim_start().starts_with("XDG_PICTURES_DIR="))?;
+    let v = line.split_once('=')?.1.trim().trim_matches('"');
+    let p = match v.strip_prefix("$HOME") {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(v),
+    };
+    (p != *home && !v.is_empty()).then_some(p)
 }
 
 /// Opaque RGB PNG. The PDF writer reuses the compressed stream as is.

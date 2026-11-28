@@ -1,5 +1,5 @@
 //! Things on screen most people would not want in a screenshot.
-use crate::capture::Frame;
+use crate::frame::Frame;
 use crate::ocr::Word;
 use regex_lite::Regex;
 use std::ops::Range;
