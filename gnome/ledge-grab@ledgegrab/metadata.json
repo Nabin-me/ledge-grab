@@ -1,0 +1,7 @@
+{
+  "uuid": "ledge-grab@ledgegrab",
+  "name": "Ledge Grab",
+  "description": "Keeps the Ledge Grab ledge above other windows, on every workspace, centred under the top bar.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/Nabin-me/ledge-grab"
+}

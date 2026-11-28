@@ -6,6 +6,8 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 export default class TestHelper extends Extension {
     enable() {
         global.context.unsafe_mode = true;
+        // lgctl.py reads the panel and layout through this.
+        global._lgMain = Main;
         const hide = () => Main.overview.hide();
         if (Main.layoutManager._startingUp)
             this._id = Main.layoutManager.connect('startup-complete', hide);

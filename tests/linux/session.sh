@@ -13,7 +13,7 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export XDG_SESSION_TYPE="$mode" XDG_CURRENT_DESKTOP=GNOME GDK_BACKEND="$mode" LG_MODE="$mode"
 export NO_AT_BRIDGE=1 GSK_RENDERER=cairo LIBGL_ALWAYS_SOFTWARE=1
 # Test helper extension: closes the startup overview so test windows are visible.
-gsettings set org.gnome.shell enabled-extensions "['lg-test-helper@ledgegrab']"
+gsettings set org.gnome.shell enabled-extensions "['lg-test-helper@ledgegrab', 'ledge-grab@ledgegrab']"
 gsettings set org.gnome.shell disable-user-extensions false
 gsettings set org.gnome.desktop.interface enable-animations false
 log="$HOME/lg-session-$mode.log"; : > "$log"
