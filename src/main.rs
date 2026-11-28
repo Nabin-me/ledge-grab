@@ -74,6 +74,8 @@ const T_CLIP: usize = 9;
 const T_PASTE: usize = 10;
 pub const T_REC: usize = 11;
 const T_QUEUE_RETRY: usize = 12;
+/// Redraws the collapsed ledge so its dots fade as screenshots age.
+const T_DOTS: usize = 13;
 
 enum Work {
     Shot(Frame, String),
@@ -1466,6 +1468,11 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 }
                 a.queue_step(n, paste_queue::Then::Place);
             }
+            T_DOTS => {
+                if n.view == View::Rest {
+                    n.repaint();
+                }
+            }
             T_HOURLY => {
                 let _ = a.store.reload();
                 n.refresh(&a.g, &a.store);
@@ -1682,6 +1689,7 @@ fn main() {
             if !scroll_pdf_preview() { let _ = AddClipboardFormatListener(a.main); }
             SetTimer(Some(a.main), T_TICK, 1500, None);
             SetTimer(Some(a.main), T_HOURLY, 3_600_000, None);
+            SetTimer(Some(a.main), T_DOTS, 60_000, None);
             SetTimer(Some(a.main), T_TRIM, 4000, None);
             n.adapt(&a.g, desk_open());
             n.start();

@@ -44,7 +44,6 @@ mod glyph {
     pub const PINNED: u16 = 0xE841;
     pub const GEAR: u16 = 0xE713;
     pub const FOLDER: u16 = 0xE8B7;
-    pub const PHOTO: u16 = 0xEB9F;
     pub const CLOSE: u16 = 0xE711;
 }
 
@@ -1059,12 +1058,21 @@ impl Notch {
                 if app.store.settings.save_only {
                     c.circle(w - 20.0, h / 2.0, 2.0, DIM, 0.92);
                 }
-                // Screenshots visible on the shelf; hidden and save-only ones don't count.
-                let shots = visible_shots(&app.store);
-                if shots > 0 {
-                    let label = if shots > 999 { "999+".to_string() } else { shots.to_string() };
-                    c.icon(glyph::PHOTO, R::new(12.0, 0.0, 10.0, h), 7.0, DIM, 0.95);
-                    c.text_w(&label, R::new(25.0, -1.0, 40.0, h + 2.0), 8.0, 600, DIM, 0.95, Align::Left);
+                // One dot per screenshot on the shelf, newest first; brighter is
+                // more recent. Hidden and save-only shots don't count.
+                let (dots, more) = shelf_dots(&app.store, crate::store::now_ms());
+                let mut x = 15.0;
+                for age in &dots {
+                    let (hex, a) = match age {
+                        Age::Fresh => (INK, 1.0),
+                        Age::Today => (DIM, 0.95),
+                        Age::Older => (DIM, 0.5),
+                    };
+                    c.circle(x, h / 2.0, 1.7, hex, a);
+                    x += 6.0;
+                }
+                if more {
+                    c.text_w("+", R::new(x - 3.0, -1.0, 10.0, h + 2.0), 8.0, 600, DIM, 0.9, Align::Left);
                 }
             }
             View::Rec => {
@@ -2151,9 +2159,36 @@ impl Notch {
     }
 }
 
-/// Screenshots the shelf shows; hidden and save-only shots are excluded.
-pub fn visible_shots(st: &Store) -> usize {
-    st.items.iter().filter(|i| i.kind == Kind::Shot && !i.hidden).count()
+/// How recent a shelf screenshot is, for the collapsed ledge's dots.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Age {
+    /// Taken in the last 15 minutes.
+    Fresh,
+    /// In the last 24 hours.
+    Today,
+    Older,
+}
+
+/// Most dots the collapsed ledge shows before a "+".
+pub const MAX_DOTS: usize = 5;
+
+/// Ages of the newest visible screenshots, newest first, and whether more exist.
+pub fn shelf_dots(st: &Store, now_ms: i64) -> (Vec<Age>, bool) {
+    let mut created: Vec<i64> =
+        st.items.iter().filter(|i| i.kind == Kind::Shot && !i.hidden).map(|i| i.created).collect();
+    created.sort_unstable_by(|a, b| b.cmp(a));
+    let ages = created.iter().take(MAX_DOTS).map(|&t| age(now_ms - t)).collect();
+    (ages, created.len() > MAX_DOTS)
+}
+
+fn age(ms: i64) -> Age {
+    if ms < 15 * 60_000 {
+        Age::Fresh
+    } else if ms < 24 * 3_600_000 {
+        Age::Today
+    } else {
+        Age::Older
+    }
 }
 
 fn queue_text(q: &crate::QueueView) -> (String, &'static str) {
@@ -2213,4 +2248,18 @@ pub fn message(n: &mut Notch, app: &mut App, msg: u32, w: WPARAM, l: LPARAM) -> 
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+mod dot_tests {
+    use super::{Age, age};
+
+    #[test]
+    fn dots_fade_with_age() {
+        assert_eq!(age(0), Age::Fresh);
+        assert_eq!(age(15 * 60_000 - 1), Age::Fresh);
+        assert_eq!(age(15 * 60_000), Age::Today);
+        assert_eq!(age(24 * 3_600_000 - 1), Age::Today);
+        assert_eq!(age(24 * 3_600_000), Age::Older);
+    }
 }

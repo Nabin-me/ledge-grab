@@ -103,7 +103,7 @@ New shortcuts are active only while the ledge is open and the pointer is over it
 The shelf's **App folders** view collects each app's visible captures across dates. The shelf stays open while you use it and briefly after the pointer leaves, so a quick slip off an edge won't close it.
 
 - **Float** pins any capture above all windows — drag to move, scroll to resize, `Ctrl` + scroll to fade opacity, right-click to close.
-- **Sequential Copy** puts your selected screenshots on the clipboard one at a time, in shelf order. Each `Ctrl` + `V` pastes the next one, even when pressed quickly. The ledge shows a small preview of the image on the clipboard and "Next 1 of 3". If a paste isn't picked up, it stops and offers **Next** instead of skipping. Copying something else ends the queue. The collapsed ledge shows how many visible screenshots are on the shelf.
+- **Sequential Copy** puts your selected screenshots on the clipboard one at a time, in shelf order. Each `Ctrl` + `V` pastes the next one, even when pressed quickly. The ledge shows a small preview of the image on the clipboard and "Next 1 of 3". If a paste isn't picked up, it stops and offers **Next** instead of skipping. Copying something else ends the queue. The collapsed ledge shows a dot for each of your newest visible screenshots (up to five, then +). Brighter dots are more recent.
 - **Copied images** optionally keeps images copied from other apps right on the ledge (copied text is never stored). Anything marked private by other apps is ignored, and you can toggle it anytime in Settings.
 
 ## Capture
