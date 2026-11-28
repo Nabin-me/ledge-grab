@@ -120,6 +120,11 @@ fn group_by_app(items: &[Item]) -> Vec<Vec<i64>> {
     folders
 }
 
+/// Ledge Grab's own data folder (the index lives here, and pending updates).
+pub fn app_data() -> PathBuf {
+    std::env::var_os("LEDGE_GRAB_DIR").map(PathBuf::from).unwrap_or_else(|| data_root().join("Ledge Grab"))
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }

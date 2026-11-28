@@ -50,6 +50,8 @@ Grab the latest Windows x64 build from [**GitHub Releases**](https://github.com/
 
 Verify downloads anytime against `SHA256SUMS.txt` attached to every release.
 
+**Updates:** Ledge Grab keeps itself up to date. It checks GitHub Releases shortly after it starts and then every 10 minutes. When a new version is out, it downloads it, verifies it, and installs it the next time nothing is in progress (no recording, Sequential Copy or Scroll to PDF running, shelf closed). The ledge restarts in about a second and says which version you're on. Installed copies run the new installer silently; portable copies replace their own exe. Copies installed for all users (admin installs) don't update themselves. See [docs/auto-update.md](docs/auto-update.md).
+
 **Uninstall:** Open **Windows Settings → Apps → Installed apps → Ledge Grab → Uninstall** (or delete the extracted folder for the portable build). Uninstalling removes the app, shortcuts, and startup entry while keeping your saved screenshots in `Pictures\Ledge Grab`.
 
 ## Seal what's private
@@ -188,7 +190,8 @@ To build the Windows Setup installer (`Inno Setup 6`), portable ZIP, and checksu
 
 ## Privacy & Verification
 
-- **Zero network, zero telemetry:** Ledge Grab makes no outbound network requests and includes no analytics, crash uploaders, or closed-source components. Every screenshot, clip, OCR scan, and redaction stays strictly on your machine, and copied text is never recorded.
+- **No telemetry:** Ledge Grab's only network request is the update check, which downloads a small signed file from GitHub Releases. GitHub sees your IP address and the Ledge Grab version, nothing else. There are no analytics, crash uploaders, or closed-source components. Every screenshot, clip, OCR scan, and redaction stays on your machine, and copied text is never recorded. To turn the update check off, set the environment variable `LEDGE_GRAB_NO_AUTO_UPDATE=1`.
+- **Signed updates:** Each release's update manifest is signed with an ed25519 key held only by the release pipeline. The app refuses an update unless the signature matches the public key built into it, the version is newer, and the file's size and SHA-256 match.
 - **Transparent builds:** Licensed under the [MIT License](LICENSE). Official releases are compiled directly from this public repository via GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) and ship with `SHA256SUMS.txt` checksums.
 - **Note on Windows SmartScreen:** Because builds are currently unsigned, Windows SmartScreen may show a warning on first run — click **More info → Run anyway**, or build directly from source with `cargo build --release`.
 

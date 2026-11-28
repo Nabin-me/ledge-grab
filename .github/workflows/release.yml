@@ -76,6 +76,19 @@ jobs:
             "$h  $($_.Name)"
           } | Set-Content -Path signed-dist\SHA256SUMS.txt -Encoding UTF8
 
+      # Installed copies only install a release whose manifest verifies against the
+      # public key in src/update.rs. Fails the release if the key secret is missing.
+      - name: Sign the auto-update manifest
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          python -m pip install --quiet cryptography
+          $dir = if (Test-Path signed-dist) { 'signed-dist' } else { 'dist' }
+          $version = ([regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
+          python packaging/update-manifest.py sign $dir $version
+          if ($LASTEXITCODE -ne 0) { throw "update manifest signing failed" }
+
       - name: Upload final release artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -104,6 +117,7 @@ jobs:
             - **`LedgeGrab-*-win-x64-portable.zip`** — Portable zero-install archive
             - **`LedgeGrab-*-win-x64.exe`** — Single standalone executable
             - **`SHA256SUMS.txt`** — SHA-256 verification checksums
+            - **`ledge-grab-update.txt`** — signed manifest that installed copies use to update themselves
 
             ### Verification
             Verify downloads against `SHA256SUMS.txt`. All binaries are built directly from source via GitHub Actions. If Windows SmartScreen warns on first launch, click **More info → Run anyway** (or build from source with `cargo build --release`).

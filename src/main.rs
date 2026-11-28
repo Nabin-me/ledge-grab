@@ -15,6 +15,9 @@ mod redact;
 mod scroll_pdf_core;
 mod secrets;
 mod store;
+// Installed only by the Windows app so far; the Linux build has no releases yet.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod update;
 mod vk;
 
 #[cfg(windows)]

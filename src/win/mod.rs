@@ -21,6 +21,8 @@ pub mod rec;
 pub mod scroll;
 #[path = "../scroll_pdf.rs"]
 pub mod scroll_pdf;
+#[path = "../updater.rs"]
+pub mod updater;
 
 use crate::{note, ocr, paste_queue, pdf, save_should_fail, scroll_pdf_preview, store, testing};
 use capture::{Frame, cursor, grab, monitors};
@@ -78,6 +80,8 @@ pub const T_REC: usize = 11;
 const T_QUEUE_RETRY: usize = 12;
 /// Redraws the collapsed ledge so its dots fade as screenshots age.
 const T_DOTS: usize = 13;
+/// Waits for an idle moment to install a downloaded update.
+const T_UPDATE: usize = 14;
 
 enum Work {
     Shot(Frame, String),
@@ -120,6 +124,8 @@ pub struct App {
     count: i64,
     overlay: Option<Overlay>,
     last_foreground: HWND,
+    /// A verified update, installed at the next idle moment.
+    update: Option<updater::Ready>,
 }
 
 enum ClipSource {
@@ -659,6 +665,17 @@ impl App {
     fn remember(&mut self, r: RECT) {
         self.store.settings.last = Some([r.left, r.top, r.right, r.bottom]);
         self.store.save_settings();
+    }
+
+    /// Nothing the user would lose or notice if the app restarted now.
+    fn idle_for_update(&self, n: &Notch) -> bool {
+        self.rec.is_none()
+            && !self.scroll_pdf_busy()
+            && self.overlay.is_none()
+            && self.interval.is_none()
+            && self.jobs == 0
+            && !n.expanded()
+            && QUEUE.lock().map(|q| q.is_none()).unwrap_or(false)
     }
 
     pub fn scroll_pdf_busy(&self) -> bool {
@@ -1246,6 +1263,12 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                 a.start(n, *m);
             }
         }
+        updater::WM_UPDATE_READY => {
+            let r = unsafe { *Box::from_raw(l.0 as *mut updater::Ready) };
+            a.update = Some(r);
+            let every = if std::env::var_os("LEDGE_GRAB_UPDATE_EVERY_SECS").is_some() { 2000 } else { 15_000 };
+            unsafe { SetTimer(Some(a.main), T_UPDATE, every, None) };
+        }
         WM_WORK => {
             let w = unsafe { *Box::from_raw(l.0 as *mut Work) };
             match w {
@@ -1449,6 +1472,17 @@ pub extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, l: LPARAM) -> LRES
                     n.repaint();
                 }
             }
+            T_UPDATE => {
+                if a.update.is_some() && a.idle_for_update(n) {
+                    unsafe {
+                        let _ = KillTimer(Some(h), T_UPDATE);
+                    }
+                    let r = a.update.take().expect("checked");
+                    if updater::apply(&r) {
+                        a.quit(n);
+                    }
+                }
+            }
             T_HOURLY => {
                 let _ = a.store.reload();
                 n.refresh(&a.g, &a.store);
@@ -1606,6 +1640,8 @@ pub fn run() {
         }
         let name = if testing() { w!("Local\\LedgeGrabTest") } else { w!("Local\\LedgeGrab") };
         let restarted = std::env::args().any(|a| a == "--restarted");
+        // An update relaunch may wait while the old copy hands its clipboard over.
+        let wait_tries = if std::env::args().any(|a| a.starts_with("--updated=")) { 300 } else { 40 };
         let mut lock = CreateMutexW(None, true, name);
         let mut tries = 0;
         while GetLastError() == ERROR_ALREADY_EXISTS {
@@ -1613,7 +1649,7 @@ pub fn run() {
                 let _ = CloseHandle(h);
             }
             tries += 1;
-            if !restarted || tries > 40 {
+            if !restarted || tries > wait_tries {
                 if preview {
                     preview_launch_error("Ledge Grab is already running",
                         "Quit the regular Ledge Grab or an earlier preview from its ledge menu, then launch the preview again. No files were changed.");
@@ -1655,6 +1691,7 @@ pub fn run() {
             count: 0,
             overlay: None,
             last_foreground: HWND::default(),
+            update: None,
         }));
         let (ap, np) = (a as *mut App, n as *mut Notch);
         APP.store(ap, Relaxed);
@@ -1669,6 +1706,18 @@ pub fn run() {
             SetTimer(Some(a.main), T_TRIM, 4000, None);
             n.adapt(&a.g, desk_open());
             n.start();
+            if !preview && !testing() {
+                note(&format!("Ledge Grab {} started", crate::update::Version::current()));
+                match updater::after_relaunch() {
+                    Some(Ok(v)) => {
+                        let hint: &'static str = Box::leak(format!("You're now on version {v}.").into_boxed_str());
+                        n.notice(&a.g, &a.store, "Ledge Grab updated", hint);
+                    }
+                    Some(Err(_)) => n.notice(&a.g, &a.store, "Update didn't install", "Ledge Grab will try again tomorrow."),
+                    None => {}
+                }
+                updater::spawn(a.main);
+            }
             if preview {
                 // Draw before telling the user it's ready; a successful launch
                 // never relies on noticing the normal 9-pixel collapsed strip.
